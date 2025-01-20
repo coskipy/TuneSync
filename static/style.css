@@ -1,0 +1,132 @@
+* {
+    margin: 0;
+    padding: 0;
+    border-width: 0;
+    color: white;
+    box-sizing: border-box;
+}
+
+
+:root {
+    --border-radius: 10px;
+    --dark-color: rgb(20, 20, 20);
+    --less-dark-color: #38b6ff28;
+    --cyan-color: #38b6ff;
+    --cyan-color-dim: #38b6ff8f;
+  }
+
+.material-symbols-outlined {
+  font-variation-settings:
+  'FILL' 0,
+  'wght' 400,
+  'GRAD' 0,
+  'opsz' 48
+}
+
+#page {
+    background-color: var(--dark-color);
+}
+
+body {
+    font-family: Arial, sans-serif;
+    text-align: left;
+    margin: 0;
+}
+
+#container {
+    width: 50%;
+    justify-self: center;
+    height: 100vh;
+    justify-items: center;
+}
+
+#download-form {
+    width: 100%;
+    margin: 20px 0;
+    display: flex;
+    flex-direction: column;
+    align-items: left;
+    gap: 25px;
+    background-color: var(--less-dark-color);
+    padding: 25px;
+    border-radius: var(--border-radius);
+}
+
+#url {
+    height: 60px;
+    width: 80%;
+    border-radius: var(--border-radius);
+    /* padding: 0 20px 0 20px; */
+    font-weight: lighter;
+    font-size: 1.1rem;
+    padding-left: 20px;
+    color: var(--dark-color);
+}
+
+#step-2-wrapper {
+    width: 80%;
+    align-content: left;
+}
+
+.go-button {
+    height: 60px;
+    width: 80%;
+    border-radius: var(--border-radius);
+    font-weight: bolder;
+    font-size: 1.2rem;
+    background-color: var(--cyan-color);
+}
+
+.go-button:hover {
+    cursor: pointer;
+    background-color: var(--cyan-color-dim);
+}
+
+#status {
+    margin-top: 20px;
+    color: green;
+}
+
+#logo {
+    height: auto;
+    width: 300px;
+    margin-top: 25px;
+    text-align: center;
+}
+
+.download-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+
+}
+
+.download-step {
+    width: 50px;
+
+}
+
+#choose-file {
+    font-size: 1.3rem;
+    font-weight: 550;
+}
+
+#upload-file-button {
+    width: fit-content;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    border: 3px solid white;
+    border-radius: var(--border-radius);
+    padding: 3px 30px 3px 10px;
+    justify-self: flex-start;
+}
+
+#upload-file-button:hover {
+    cursor: pointer;
+    background-color: #ffffff1c;
+}
+
+#upload-file-button:hover #choose-file{
+    cursor: pointer;
+}
