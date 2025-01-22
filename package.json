@@ -1,0 +1,24 @@
+{
+  "name": "tunesync",
+  "version": "1.0.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coskipy/TuneSync.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/coskipy/TuneSync/issues"
+  },
+  "homepage": "https://github.com/coskipy/TuneSync#readme",
+  "description": "",
+  "devDependencies": {
+    "electron": "^34.0.0"
+  }
+}

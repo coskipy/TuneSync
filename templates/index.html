@@ -3,13 +3,17 @@
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
 		<title>TuneSync</title>
 		<link
 			rel="icon"
-			href="../static/resources/Favicon.png"
+			href="{{ url_for('static', filename='resources/Favicon.png') }}"
 			type="image/png"
 		/>
-		<link rel="stylesheet" href="/static/style.css" />
+		<link
+			rel="stylesheet"
+			href="{{ url_for('static', filename='style.css') }}"
+		/>
 		<link
 			rel="stylesheet"
 			href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&icon_names=folder"
@@ -17,7 +21,10 @@
 	</head>
 	<div id="container">
 		<body>
-			<img src="../static/resources/TuneSync-White.png" id="logo" />
+			<img
+				src="{{ url_for('static', filename='resources/TuneSync-White.png') }}"
+				id="logo"
+			/>
 			<form id="download-form">
 				<h2>Download and Sync your Music</h2>
 				<div class="download-row">
@@ -36,9 +43,10 @@
 					<div id="step-2-wrapper">
 						<div id="upload-file-button">
 							<input
-								type="text"
+								type="file"
 								id="path"
 								style="display: none"
+								webkitdirectory
 							/>
 							<svg
 								xmlns="http://www.w3.org/2000/svg"
@@ -65,7 +73,7 @@
 				</div>
 			</form>
 			<div id="status"></div>
-			<script src="/static/script.js"></script>
+			<script src="{{ url_for('static', filename='script.js') }}"></script>
 		</body>
 	</div>
 </html>

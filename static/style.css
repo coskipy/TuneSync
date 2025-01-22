@@ -34,7 +34,8 @@ body {
 }
 
 #container {
-    width: 50%;
+    min-width: fit-content;
+    width: 60%;
     justify-self: center;
     height: 100vh;
     justify-items: center;

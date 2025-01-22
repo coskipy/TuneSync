@@ -55,3 +55,18 @@ document
 			statusDiv.style.color = "red";
 		}
 	});
+
+document.getElementById("path").addEventListener("change", function (event) {
+	const files = event.target.files;
+	if (files.length > 0) {
+		// Get the webkitRelativePath of the first file to extract the folder name
+		const folderPath = files[0].webkitRelativePath; // Get path like 'folder_name/file1.txt'
+		const folderName = folderPath.split("/")[0]; // Split at '/' and take the first part
+
+		console.log("Selected folder name:", folderName);
+
+		document.getElementById("choose-file").textContent = folderName;
+	} else {
+		console.log("No folder selected.");
+	}
+});
