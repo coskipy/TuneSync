@@ -1,0 +1,5 @@
+To sync playlist using spotdl:
+    1. If sync folder does not exist: 
+        spotdl sync 'url' --save-file [archive file].spotdl --output [folder path]
+    2. To sync existing folder
+        spotdl sync [archive file].spotdl

@@ -14,10 +14,6 @@
 			rel="stylesheet"
 			href="{{ url_for('static', filename='style.css') }}"
 		/>
-		<link
-			rel="stylesheet"
-			href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&icon_names=folder"
-		/>
 	</head>
 	<div id="container">
 		<body>
@@ -25,53 +21,70 @@
 				src="{{ url_for('static', filename='resources/TuneSync-White.png') }}"
 				id="logo"
 			/>
-			<form id="download-form">
-				<h2>Download and Sync your Music</h2>
+
+			<form id="download-form" class="form">
+				<h3>Create new local playlist</h3>
 				<div class="download-row">
-					<h3 class="download-step">1</h3>
 					<input
 						type="text"
 						id="url"
 						name="url"
-						placeholder="Soundcloud URL - Playlist, Album or Song"
+						placeholder="Enter URL (Spotify or Soundcloud)"
 						required
 					/>
-					<div class="download-step"></div>
 				</div>
 				<div class="download-row upload-file">
-					<h3 class="download-step">2</h3>
-					<div id="step-2-wrapper">
-						<div id="upload-file-button">
-							<input
-								type="file"
-								id="path"
-								style="display: none"
-								webkitdirectory
+					<button class="button" id="go-button" type="submit">
+						<svg
+							xmlns="http://www.w3.org/2000/svg"
+							height="24px"
+							viewBox="0 -960 960 960"
+							width="24px"
+							fill="#FFFFFF"
+						>
+							<path
+								d="M480-320 280-520l56-58 104 104v-326h80v326l104-104 56 58-200 200ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z"
 							/>
-							<svg
-								xmlns="http://www.w3.org/2000/svg"
-								height="48px"
-								viewBox="0 -960 960 960"
-								width="48px"
-								fill="#FFFFFF"
-							>
-								<path
-									d="M186-180q-36.73 0-61.36-24.64Q100-229.27 100-266v-428q0-36.72 24.64-61.36Q149.27-780 186-780h167l106 106h315q36.72 0 61.36 24.64T860-588v322q0 36.73-24.64 61.36Q810.72-180 774-180H186Zm0-54h588q14 0 23-9t9-23v-322q0-14-9-23t-23-9H437L331-726H186q-14 0-23 9t-9 23v428q0 14 9 23t23 9Zm-32 0v-492 492Z"
-								/>
-							</svg>
-							<label id="choose-file" for="path"
-								>Choose folder</label
-							>
-						</div>
-					</div>
-					<div class="download-step"></div>
-				</div>
-				<div class="download-row">
-					<h3 class="download-step">3</h3>
-					<button class="go-button" type="submit">GO</button>
-					<div class="download-step"></div>
+						</svg>
+						Download
+					</button>
+					<p class="note">
+						*the download will not create its own folder
+					</p>
 				</div>
 			</form>
+			<div class="seperator">- or -</div>
+			<div id="sync-form" class="form">
+				<h3>Sync existing playlists</h3>
+				<button class="sync-button button" id="sync-all">
+					<svg
+						xmlns="http://www.w3.org/2000/svg"
+						height="24px"
+						viewBox="0 -960 960 960"
+						width="24px"
+						fill="#FFFFFF"
+					>
+						<path
+							d="M160-160v-80h110l-16-14q-52-46-73-105t-21-119q0-111 66.5-197.5T400-790v84q-72 26-116 88.5T240-478q0 45 17 87.5t53 78.5l10 10v-98h80v240H160Zm400-10v-84q72-26 116-88.5T720-482q0-45-17-87.5T650-648l-10-10v98h-80v-240h240v80H690l16 14q49 49 71.5 106.5T800-482q0 111-66.5 197.5T560-170Z"
+						/>
+					</svg>
+					Sync All
+				</button>
+				<button class="sync-button button" id="sync-specific">
+					<svg
+						xmlns="http://www.w3.org/2000/svg"
+						height="24px"
+						viewBox="0 -960 960 960"
+						width="24px"
+						fill="#FFFFFF"
+					>
+						<path
+							d="M716-520q-7-41-27-76t-49-62v98h-80v-240h240v80H691q43 38 70.5 89T797-520h-81ZM600-280h200v-80H600v80Zm-20 80q-25 0-42.5-17.5T520-260v-120q0-25 17.5-42.5T580-440h240q25 0 42.5 17.5T880-380v120q0 25-17.5 42.5T820-200H580Zm-420 40v-80h109q-51-44-80-106t-29-134q0-112 68-197.5T400-790v84q-70 25-115 86.5T240-480q0 54 21.5 99.5T320-302v-98h80v240H160Zm320 80v-80h440v80H480Zm120-200v-80 80Z"
+						/>
+					</svg>
+					Sync Selected
+				</button>
+			</div>
 			<div id="status"></div>
 			<script src="{{ url_for('static', filename='script.js') }}"></script>
 		</body>

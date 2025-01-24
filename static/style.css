@@ -9,10 +9,10 @@
 
 :root {
     --border-radius: 10px;
-    --dark-color: rgb(20, 20, 20);
+    --dark-color: #121212;
     --less-dark-color: #38b6ff28;
-    --cyan-color: #38b6ff;
-    --cyan-color-dim: #38b6ff8f;
+    --green-color: #1DB954;
+    --green-color-bright: #24dd64;
   }
 
 .material-symbols-outlined {
@@ -20,7 +20,7 @@
   'FILL' 0,
   'wght' 400,
   'GRAD' 0,
-  'opsz' 48
+  'opsz' 24
 }
 
 #page {
@@ -35,52 +35,64 @@ body {
 
 #container {
     min-width: fit-content;
-    width: 60%;
-    justify-self: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
     height: 100vh;
+    width: 100vw;
     justify-items: center;
+    gap: 5px;
 }
 
-#download-form {
-    width: 100%;
-    margin: 20px 0;
+.form {
+    width: clamp(375px, 50%, 750px);
     display: flex;
     flex-direction: column;
     align-items: left;
-    gap: 25px;
-    background-color: var(--less-dark-color);
-    padding: 25px;
+    gap: 15px;
+    padding: 15px 40px;
     border-radius: var(--border-radius);
 }
 
 #url {
-    height: 60px;
-    width: 80%;
+    height: 40px;
+    width: 100%;
     border-radius: var(--border-radius);
-    /* padding: 0 20px 0 20px; */
     font-weight: lighter;
-    font-size: 1.1rem;
-    padding-left: 20px;
+    font-size: 1rem;
+    padding: 0 20px;
     color: var(--dark-color);
 }
 
 #step-2-wrapper {
     width: 80%;
-    align-content: left;
+    display: flex;
+    align-items: center;
 }
 
-.go-button {
-    height: 60px;
-    width: 80%;
+.button {
+    height: 40px;
+    min-width: 80px;
     border-radius: var(--border-radius);
     font-weight: bolder;
     font-size: 1.2rem;
-    background-color: var(--cyan-color);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 10px;
 }
 
-.go-button:hover {
+#go-button{
+    width: 100%;
+    background-color: var(--green-color);
+}
+
+.button:hover {
     cursor: pointer;
-    background-color: var(--cyan-color-dim);
+}
+
+#go-button:hover {
+    background-color: var(--green-color-bright);
 }
 
 #status {
@@ -90,14 +102,17 @@ body {
 
 #logo {
     height: auto;
-    width: 300px;
-    margin-top: 25px;
+    width: 150px;
+    margin-top: 15px;
     text-align: center;
 }
 
-.download-row {
+.download-row{
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    width: 100%;
+    gap: 7px;
+    align-items: start;
     justify-content: space-between;
 
 }
@@ -108,12 +123,13 @@ body {
 }
 
 #choose-file {
-    font-size: 1.3rem;
-    font-weight: 550;
+    font-size: 1rem;
+    font-weight: lighter;
 }
 
 #upload-file-button {
     width: fit-content;
+    height: 40px;
     display: flex;
     gap: 10px;
     align-items: center;
@@ -130,4 +146,43 @@ body {
 
 #upload-file-button:hover #choose-file{
     cursor: pointer;
+}
+
+.sync-form {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    text-align: center;
+    gap: 10px;
+    width: 100%;
+}
+
+.sync-button {
+    width: 100%;
+}
+
+#sync-all {
+    background-color: var(--green-color);
+}
+
+#sync-all:hover {
+    background-color: var(--green-color-bright);
+}
+
+#sync-specific {
+    border: 3px solid white;
+    border-radius: var(--border-radius);
+    background: transparent;
+}
+
+#sync-specific:hover {
+    background-color: #ffffff1c;
+    cursor: pointer;
+}
+
+.note {
+    font-size: 0.75rem;
+    font-weight: lighter;
+    font-style: italic;
+    color: #ffffffa3;
 }
