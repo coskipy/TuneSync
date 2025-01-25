@@ -1,11 +1,10 @@
-let absoluteDirPath = "";
+const statusDiv = document.getElementById("status");
 
 document
 	.getElementById("download-form")
 	.addEventListener("submit", async (e) => {
 		e.preventDefault();
 		const url = document.getElementById("url").value;
-		const statusDiv = document.getElementById("status");
 
 		const folderPath = await window.electron.selectFolder();
 
@@ -31,30 +30,19 @@ document
 		}
 	});
 
-async function selectFolderAndUpdateUI(buttonId, outputId) {
-	const folderPath = await window.electron.selectFolder();
-	const button = document.getElementById(buttonId);
-	const outputElement = document.getElementById(outputId);
+document.getElementById("sync-all").addEventListener("click", async () => {
+	statusDiv.textContent = "Syncing...";
 
-	if (folderPath) {
-		button.textContent = `Selected Folder: ${folderPath}`;
+	const response = await fetch("/sync-all", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+	});
+
+	const result = await response.json();
+	if (response.ok) {
+		statusDiv.textContent = result.message;
 	} else {
-		button.textContent = "No folder selected.";
+		statusDiv.textContent = `Error: ${result.message}`;
+		statusDiv.style.color = "red";
 	}
-
-	// You can return the folder path if needed
-	return folderPath;
-}
-
-// document.getElementById("path").addEventListener("change", function (event) {
-// 	const files = event.target.files;
-// 	if (files.length > 0) {
-// 		// Get the webkitRelativePath of the first file to extract the folder name
-// 		const folderPath = files[0].webkitRelativePath; // Get path like 'folder_name/file1.txt'
-// 		const folderName = folderPath.split("/")[0]; // Split at '/' and take the first part
-
-// 		document.getElementById("choose-file").textContent = folderName;
-// 	} else {
-// 		console.log("No folder selected.");
-// 	}
-// });
+});

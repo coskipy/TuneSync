@@ -1,4 +1,5 @@
-import re
+import json
+from pathlib import Path
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 import subprocess
@@ -7,6 +8,7 @@ import os
 
 app = Flask(__name__)
 CORS(app)  # Allow all origins
+syncedDirsJson = "syncedDirs.json"
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -16,12 +18,45 @@ logger = logging.getLogger(__name__)
 def index():
     return render_template('index.html')
 
+# Function to add a path string to the JSON file
+def add_path_to_json(file_name, new_path):
+    playlist_paths = []
+    
+    # Check if the file exists
+    if Path(file_name).exists():
+        # Attempt to load JSON content
+        try:
+            with open(file_name, "r") as f:
+                if f.read().strip():  # Check if the file is not empty
+                    f.seek(0)  # Go back to the beginning of the file
+                    playlist_paths = json.load(f)
+        except json.JSONDecodeError:
+            # Handle cases where the file contains invalid JSON
+            print(f"Warning: {file_name} contains invalid JSON. Reinitializing.")
+    
+    # Add the new path to the list if it's not already there
+    if new_path not in playlist_paths:
+        playlist_paths.append(new_path)
+    
+    # Write the updated list back to the file
+    with open(file_name, "w") as f:
+        json.dump(playlist_paths, f, indent=4)
+
+
 @app.route('/download', methods=['POST'])
 def download():
     data = request.json
 
     url = data.get('url')
     path = data.get('path')
+
+    # If the JSON file doesn't exist, create it
+    if not syncedDirsJson in os.listdir():
+            # Open the file in write mode, which creates the file if it doesn't exist
+        with open(syncedDirsJson, "w") as file:
+          pass  # The file is now created but empty
+    
+    add_path_to_json(syncedDirsJson, path)
     
     try:
         if "spotify" in url:
@@ -47,53 +82,55 @@ def download():
     logger.info("Command executed successfully.")
     logger.info("Command Output: %s", result.stdout)
     return jsonify({"status": "success", "message": "Download complete at " + path, "output": result.stdout})
-    
-    
-    # if not url:
-    #     logger.error("No URL provided in the request.")
-    #     return jsonify({"status": "error", "message": "URL is required"}), 400
 
-    # output_dir = data.get('output_dir')
 
-    # sync = data.get('sync')
+@app.route('/sync-all', methods=['POST'])
+def sync_all():
+    if not syncedDirsJson in os.listdir():
+        return jsonify({"status": "error", "message": "No directories to sync"}), 500
     
-    # try:
-    #     # Run SCDL command and capture output
+    with open(syncedDirsJson, "r") as f:
+        playlist_paths = json.load(f)
 
-    #     if "soundcloud.com" in url:
-    #         print("soundcloud link")
-    #         result = subprocess.run(
-    #         ['scdl', '-l', url, '--path', output_dir],
-    #         check=True,
-    #         stdout=subprocess.PIPE,  # Capture standard output
-    #         stderr=subprocess.PIPE,  # Capture error output
-    #         text=True  # Decode bytes to string
-    #       )
+    num_synced = 0
+
+    for path in playlist_paths:
+
+        if os.path.isdir(path):
+            try:
+                result = subprocess.run(["spotdl", "sync", os.path.join(path, "SyncData.spotdl"), "--output", path],
+                                        check=True,
+                                        stdout=subprocess.PIPE,  # Capture standard output
+                                        stderr=subprocess.PIPE,  # Capture error output
+                                        text=True  # Decode bytes to string
+                                        )
+                num_synced += 1
+
+            except subprocess.CalledProcessError as e:
+                # Log errors from the SCDL command
+                logger.error("SCDL command failed!")
+                logger.error("Error Output: %s", e.stderr)
+                return jsonify({"status": "error", "message": "Download failed", "error": e.stderr}), 500
             
-    #     elif "spotify.com" in url:
-    #         print("spotfiy link")
-    #         result = subprocess.run(
-    #         ['youtube-dl', '-i', '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0', '-o', output_dir + '/%(title)s.%(ext)s', url],
-    #         check=True,
-    #         stdout=subprocess.PIPE,  # Capture standard output
-    #         stderr=subprocess.PIPE,  # Capture error output
-    #         text=True  # Decode bytes to string
-    #         )
-
+            except Exception as e:
+                # Catch other unexpected errors
+                logger.exception("An unexpected error occurred.")
+                return jsonify({"status": "error", "message": "An unexpected error occurred", "error": str(e)}), 500
         
-        
+        else:
+            # If the directory does not exist, log the issue and remove from the list
+            logger.error(f"Directory {path} does not exist. Removing from list.")
+            
+            # Optionally remove the path from the playlist_paths list and update the JSON file
+            playlist_paths = [p for p in playlist_paths if p != path]
 
-    
-    # except subprocess.CalledProcessError as e:
-    #     # Log errors from the SCDL command
-    #     logger.error("SCDL command failed!")
-    #     logger.error("Error Output: %s", e.stderr)
-    #     return jsonify({"status": "error", "message": "Download failed", "error": e.stderr}), 500
-    
-    # except Exception as e:
-    #     # Catch other unexpected errors
-    #     logger.exception("An unexpected error occurred.")
-    #     return jsonify({"status": "error", "message": "An unexpected error occurred", "error": str(e)}), 500
+            # Update the JSON file to reflect the removal of the invalid path
+            with open(syncedDirsJson, "w") as f:
+                json.dump(playlist_paths, f, indent=4)
+
+    # Log and return successful output
+    logger.info("Command executed successfully.")
+    return jsonify({"status": "success", "message": "Successfully synced "+  f"{num_synced}" + " playlists"})
 
 if __name__ == '__main__':
     app.run(debug=True)
