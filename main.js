@@ -114,7 +114,7 @@ app.on("window-all-closed", () => {
 	}
 });
 
-// Handle folder selection
+// Foler creation and selection for download
 ipcMain.handle("select-folder", async () => {
 	const result = await dialog.showOpenDialog({
 		properties: ["openDirectory", "createDirectory"],
@@ -122,6 +122,19 @@ ipcMain.handle("select-folder", async () => {
 
 	if (!result.canceled && result.filePaths.length > 0) {
 		return result.filePaths[0]; // Return the selected directory path
+	}
+
+	return null;
+});
+
+// Multi-folder selection for sync selected
+ipcMain.handle("select-folders", async () => {
+	const result = await dialog.showOpenDialog({
+		properties: ["openDirectory", "multiSelections"],
+	});
+
+	if (!result.canceled && result.filePaths.length > 0) {
+		return result.filePaths; // Return the selected directory paths
 	}
 
 	return null;

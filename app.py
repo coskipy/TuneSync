@@ -51,16 +51,24 @@ def download():
     path = data.get('path')
 
     # If the JSON file doesn't exist, create it
-    if not syncedDirsJson in os.listdir():
+    if (not syncedDirsJson in os.listdir()):
             # Open the file in write mode, which creates the file if it doesn't exist
         with open(syncedDirsJson, "w") as file:
           pass  # The file is now created but empty
-    
-    add_path_to_json(syncedDirsJson, path)
+
     
     try:
-        if "spotify" in url:
+        # Check if the URL is a playlist (for syncing purposes)
+        if ("/playlist/" in url) or ("/sets/" in url):
+            add_path_to_json(syncedDirsJson, path)
             result = subprocess.run(["spotdl", "sync", url, "--output", path, "--save-file", os.path.join(path, "SyncData.spotdl")],
+                                    check=True,
+                                    stdout=subprocess.PIPE,  # Capture standard output
+                                    stderr=subprocess.PIPE,  # Capture error output
+                                    text=True  # Decode bytes to string
+                                    )
+        else:
+            result = subprocess.run(["spotdl", "download", url, "--output", path],
                                     check=True,
                                     stdout=subprocess.PIPE,  # Capture standard output
                                     stderr=subprocess.PIPE,  # Capture error output
@@ -131,6 +139,47 @@ def sync_all():
     # Log and return successful output
     logger.info("Command executed successfully.")
     return jsonify({"status": "success", "message": "Successfully synced "+  f"{num_synced}" + " playlists"})
+
+@app.route('/sync-selected', methods=['POST'])
+def sync_selected():
+    try:
+        # Extract the JSON body
+        data = request.get_json()
+        if not data or "paths" not in data:
+            return jsonify({"message": "Invalid request, no paths provided"}), 400
+
+        # Get the list of paths
+        paths = data["paths"]
+
+        number_synced = 0
+
+        for path in paths:
+            try:
+                result = subprocess.run(["spotdl", "sync", os.path.join(path, "SyncData.spotdl"), "--output", path],
+                                        check=True,
+                                        stdout=subprocess.PIPE,  # Capture standard output
+                                        stderr=subprocess.PIPE,  # Capture error output
+                                        text=True  # Decode bytes to string
+                                        )
+                number_synced += 1
+
+            except subprocess.CalledProcessError as e:
+                # Log errors from the SCDL command
+                logger.error("SCDL command failed!")
+                logger.error("Error Output: %s", e.stderr)
+                return jsonify({"status": "error", "message": "Download failed", "error": e.stderr}), 500
+            
+            except Exception as e:
+                # Catch other unexpected errors
+                logger.exception("An unexpected error occurred.")
+                return jsonify({"status": "error", "message": "An unexpected error occurred", "error": str(e)}), 500
+
+        # Return a success message
+        return jsonify({"message": "Successfully synced " + f"{number_synced}" + " playlists."}), 200
+
+    except Exception as e:
+        # Handle unexpected errors
+        return jsonify({"message": f"An error occurred: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)

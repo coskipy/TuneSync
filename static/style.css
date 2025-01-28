@@ -169,13 +169,13 @@ body {
     background-color: var(--green-color-bright);
 }
 
-#sync-specific {
+#sync-selected {
     border: 3px solid white;
     border-radius: var(--border-radius);
     background: transparent;
 }
 
-#sync-specific:hover {
+#sync-selected:hover {
     background-color: #ffffff1c;
     cursor: pointer;
 }
