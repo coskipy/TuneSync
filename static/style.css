@@ -82,7 +82,7 @@ body {
     gap: 10px;
 }
 
-#go-button{
+#download-button{
     width: 100%;
     background-color: var(--green-color);
 }
@@ -91,7 +91,7 @@ body {
     cursor: pointer;
 }
 
-#go-button:hover {
+#download-button:hover {
     background-color: var(--green-color-bright);
 }
 
