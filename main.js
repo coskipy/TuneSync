@@ -1,10 +1,13 @@
 const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const path = require("path");
+const chokidar = require("chokidar");
 const { spawn } = require("child_process");
 const http = require("http");
+const fs = require("fs");
 
 let flaskProcess;
 let mainWindow;
+let watcher = null;
 
 const FLASK_URL = "http://127.0.0.1:5000";
 
@@ -138,4 +141,79 @@ ipcMain.handle("select-folders", async () => {
 	}
 
 	return null;
+});
+
+const audioExtensions = [
+	".mp3",
+	".m4a",
+	".wav",
+	".aac",
+	".flac",
+	".ogg",
+	".aiff",
+	".wma",
+	".opus",
+	".mp4",
+	".m4b",
+	".m4p",
+	".webm",
+	".amr",
+	".3ga",
+];
+
+// Function to start watching a directory
+function startWatching(dirPath) {
+	// Close existing watcher if it exists
+	if (watcher) {
+		watcher.close();
+	}
+
+	// Create new watcher
+	watcher = chokidar.watch(dirPath, {
+		persistent: true,
+		ignoreInitial: false,
+	});
+	watcher.on("add", (filePath) => {
+		if (
+			audioExtensions.some(
+				(ext) => path.extname(filePath).toLowerCase() === ext
+			)
+		) {
+			// Extract filename without extension using path.parse
+			const fileNameWithoutExtension = path.parse(filePath).name;
+
+			// Send it to the main window without the extension
+			mainWindow.webContents.send("file-added", fileNameWithoutExtension);
+		}
+	});
+
+	watcher.on("unlink", (filePath) => {
+		const fileName = path.basename(filePath);
+		mainWindow.webContents.send("file-removed", fileName);
+	});
+
+	watcher.on("ready", () => {
+		fs.readdir(dirPath, (err, files) => {
+			if (!err && mainWindow) {
+				mainWindow.webContents.send("file-list-initial", files);
+			}
+		});
+	});
+}
+
+// Function to stop watching
+function stopWatching() {
+	if (watcher) {
+		watcher.close();
+		watcher = null; // Clear the reference
+	}
+}
+
+// Handle IPC messages from renderer
+ipcMain.on("start-watching", (event, dirPath) => {
+	startWatching(dirPath);
+});
+
+ipcMain.on("stop-watching", () => {
+	stopWatching();
 });

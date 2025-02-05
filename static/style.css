@@ -13,6 +13,9 @@
     --less-dark-color: #38b6ff28;
     --green-color: #1DB954;
     --green-color-bright: #24dd64;
+    --red-color: #ff1504db;
+    --red-color-bright: #ff0404;
+    --standard-width: clamp(375px, 50%, 750px);
   }
 
 .material-symbols-outlined {
@@ -44,8 +47,37 @@ body {
     gap: 5px;
 }
 
+.header {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    position: relative;
+    padding: 0 40px;
+    width: var(--standard-width);
+    margin-top: 15px;
+
+}
+
+#logo {
+    margin: 0 auto;
+    height: auto;
+    width: 150px;
+    text-align: center;
+}
+
+#spotify-login {
+    position: absolute;
+    left: 40px;
+    padding-top: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    font-size: 0.8rem;
+    font-weight: bold;
+}
+
 .form {
-    width: clamp(375px, 50%, 750px);
+    width: var(--standard-width);
     display: flex;
     flex-direction: column;
     align-items: left;
@@ -87,6 +119,15 @@ body {
     background-color: var(--green-color);
 }
 
+#cancel-button {
+    width: 100%;
+    background-color: var(--red-color);
+}
+
+#cancel-button:hover {
+    background-color: var(--red-color-bright);
+}
+
 .button:hover {
     cursor: pointer;
 }
@@ -98,13 +139,6 @@ body {
 #status {
     margin-top: 20px;
     color: green;
-}
-
-#logo {
-    height: auto;
-    width: 150px;
-    margin-top: 15px;
-    text-align: center;
 }
 
 .download-row{
@@ -185,4 +219,109 @@ body {
     font-weight: lighter;
     font-style: italic;
     color: #ffffffa3;
+}
+
+.progress {
+    display: flex;
+    flex-direction: column;
+    width: calc(var(--standard-width) - 100px);
+    margin-top: -10px;
+}
+
+#progress-header {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    user-select: none;
+    margin-right: auto;
+    width: 100%;
+}
+
+#progress-info {
+    display: flex;
+    align-items: center;
+}
+
+.progress svg {
+    cursor: pointer;
+}
+
+#progress-count-songs {
+    display: flex;
+}
+
+#progress-title {
+    display: flex;
+}
+
+#progress-window {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+    min-height: 0;
+    max-height: 200px;
+    height: auto;
+    overflow-y: auto;
+}
+
+.progress-track img {
+    margin: 5px 10px 0 0;
+}
+
+.progress-track {
+    display: flex;
+    align-items: center;
+    width: 100%;
+}
+
+.playlist-name {
+    color: var(--green-color);
+    justify-self: center;
+    font-weight: bold;
+    
+}
+
+.track-name {
+    font-size: 0.9rem;
+    padding-bottom: 2px;
+    max-width: 175px;
+}
+
+.track-artist {
+    font-size: 0.6rem;
+    font-weight: bold;
+}
+
+.progress-downloading {
+    background-color: orange;
+}
+
+.progress-downloaded {
+    background-color: var(--green-color);
+}
+
+#loading-bar-container {
+    width: 100%; /* Full width of the viewport */
+    max-width: 100%; /* Prevents overflow */
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.2);
+    overflow: hidden;
+    position: relative;
+    margin-bottom: 10px;
+}
+
+.loading-bar {
+    height: 100%;
+    width: 150px; /* Fixed width so it keeps moving */
+    background: var(--green-color);
+    position: absolute;
+    animation: loadingAnim 1.5s infinite linear;
+}
+
+@keyframes loadingAnim {
+    0% { left: -150px; }
+    100% { left: 100%; }
 }
