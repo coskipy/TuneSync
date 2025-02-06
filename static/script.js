@@ -112,6 +112,7 @@ document.getElementById("sync-all").addEventListener("click", async () => {
 		statusDiv.textContent = `Error: ${result.message}`;
 		statusDiv.style.color = "red";
 	}
+	// console.log(result.message);
 });
 
 document.getElementById("sync-selected").addEventListener("click", async () => {

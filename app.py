@@ -1,3 +1,4 @@
+from glob import glob
 import json
 from pathlib import Path
 import re
@@ -76,7 +77,7 @@ def get_current_user():
     user_info = sp_client.me()
     return jsonify(user_info)
 
-# OAuth callback route
+"""OAuth callback route"""
 @app.route('/callback')
 def callback():
     code = request.args.get("code")
@@ -101,9 +102,7 @@ def callback():
     return redirect(f"/?user_name={user_name}&access_token={spotify_access_token}")
 
 
-
-
-# Function to add a path string to the JSON file
+"""Function to add a path string to the JSON file"""
 def add_path_to_json(file_name, new_path):
     playlist_paths = []
     
@@ -126,6 +125,7 @@ def add_path_to_json(file_name, new_path):
     # Write the updated list back to the file
     with open(file_name, "w") as f:
         json.dump(playlist_paths, f, indent=4)
+
 
 """Download a playlist, song or album from Spotify. Metadata for syncing is saved alongside file"""
 @app.route('/download', methods=['POST'])
@@ -150,30 +150,12 @@ def download():
         with open(os.path.join(path, "metadata.json"), "w") as temp_file:
             json.dump(playlist_metadata, temp_file, indent=4)
 
-    formatted_path = f"{path}/{{artist}} - {{title}}.{{output-ext}}"
-    
-    command = ["spotdl", "download", url, "--output", formatted_path]
+    result = spotdl_download([url], path)
 
-    if spotify_access_token != "":
-        command.append("--user-auth")
-        command.append("--auth-token")
-        command.append(spotify_access_token)
-
-    try:
-        current_process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-
-        stdout, stderr = current_process.communicate()
-        return jsonify({"status": "success", "stdout": stdout, "stderr": stderr})
-
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+    return result
 
 
+"""Stop the current download process"""
 @app.route('/stop-download', methods=['POST'])
 def stop_download():
     global current_process
@@ -185,44 +167,25 @@ def stop_download():
         return jsonify({"status": "error", "message": "No download process running"}), 400
 
 
+"""Sync all downloaded playlists using the metadata file in the directory"""
 @app.route('/sync-all', methods=['POST'])
 def sync_all():
-    global current_process
+    # If no synced directories exist
     if not os.path.exists(syncedDirsJson):
-        return jsonify({"status": "error", "message": "No directories to sync"}), 500
+        return jsonify({"status": "error", "message": "No directories to sync."}), 500
     
+    # Get a list of paths pointing to existing playlist directories to sync
     with open(syncedDirsJson, "r") as f:
         playlist_paths = json.load(f)
-
     num_synced = 0
 
     for path in playlist_paths:
-
-        if os.path.isdir(path):
-            try:
-                current_process = subprocess.Popen(
-                    ["spotdl", "sync", os.path.join(path, "SyncData.spotdl"), "--output", path],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                stdout, stderr = current_process.communicate()
-                num_synced += 1
-            except Exception as e:
-                return jsonify({"status": "error", "message": str(e)}), 500
+        response_json, status_code = sync_directory(path)
+        response_json = response_json.get_json()  # Convert Response to dict
+        if response_json.get('status', '') == 'success':
+            num_synced += 1
         
-        else:
-            # If the directory does not exist, log the issue and remove from the list
-            logger.error(f"Directory {path} does not exist. Removing from list.")
-            
-            # Optionally remove the path from the playlist_paths list and update the JSON file
-            playlist_paths = [p for p in playlist_paths if p != path]
-
-            # Update the JSON file to reflect the removal of the invalid path
-            with open(syncedDirsJson, "w") as f:
-                json.dump(playlist_paths, f, indent=4)
-
-    return jsonify({"status": "success", "message": f"Successfully synced {num_synced} playlists"})
+    return jsonify({"status": "success", "message": f"Successfully synced {num_synced} playlists. {response_json}"}), 200
 
 
 @app.route('/sync-selected', methods=['POST'])
@@ -242,7 +205,7 @@ def sync_selected():
         for path in paths:
             try:
                 current_process = subprocess.Popen(
-                    ["spotdl", "sync", os.path.join(path, "SyncData.spotdl"), "--output", path],
+                    ["spotdl", "sync", os.path.cwjoin(path, "SyncData.spotdl"), "--output", path],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True
@@ -253,10 +216,109 @@ def sync_selected():
             except Exception as e:
                 return jsonify({"status": "error", "message": str(e)}), 500
 
-        return jsonify({"message": f"Successfully synced {number_synced} playlists."}), 200
+        return jsonify({"status": "success", "message": f"Successfully synced {number_synced} playlists."}), 200
 
     except Exception as e:
         return jsonify({"message": f"An error occurred: {str(e)}"}), 500
+
+def sync_directory(path):
+    if os.path.isdir(path):
+            try:
+                # Get downloaded metadata
+                with open(os.path.join(path, 'metadata.json'), 'r') as downloaded_metadata:
+                    downloaded_metadata = json.load(downloaded_metadata)
+
+                # Create map to delete songs based on ID. Map: song_id -> "{artist} - {title}"
+                metadata_map = {
+                    song["song_id"]: f"{song['artist']} - {song['name']}"
+                    for song in downloaded_metadata.get('songs', [])
+                }
+                
+                # Get latest metadata
+                playlist_link = downloaded_metadata.get('query', {})[0]
+                playlist_metadata = get_playlist_metadata(playlist_link)
+
+                # Get songs from metadata for comparison: song_id -> song object
+                downloaded_songs = {song["song_id"]: song for song in downloaded_metadata["songs"]}
+                playlist_songs = {song["song_id"]: song for song in playlist_metadata["songs"]}
+
+                # Get songs to remove or add based on differences (list of song IDs)
+                songs_to_remove = [song for song_id, song in downloaded_songs.items() if song_id not in playlist_songs]
+                songs_to_add = [song for song_id, song in playlist_songs.items() if song_id not in downloaded_songs]
+
+                # Delete excess songs
+                for song in songs_to_remove:
+                    song_name = metadata_map[song.get("song_id", "")]
+                    matching_files = glob(f"{path}/{song_name}.*")  # Find any file with this name
+                    for file in matching_files:
+                        os.remove(file)  # Remove each found file
+
+                # Download new songs
+                if songs_to_add:
+                    download_urls = [f"https://open.spotify.com/track/{song['song_id']}" for song in songs_to_add] # Create 
+                    spotdl_download(download_urls, path)
+
+                # Update the metadata file with the latest metadata
+                with open(os.path.join(path, "metadata.json"), "w") as old_metadata:
+                    json.dump(playlist_metadata, old_metadata, indent=4)
+
+            except SpotifyException as se:
+                return jsonify({"status": "error", "message": "Spotify error syncing directory"}), 500
+            except Exception as e:
+                return jsonify({"status": "error", "message": f"Error syncing directory: {e}"}), 500        
+    else:
+        # Remove the path from the playlist_paths list and update the JSON file
+        playlist_paths = [p for p in playlist_paths if p != path]
+
+        # Update the JSON file to reflect the removal of the invalid path
+        with open(syncedDirsJson, "w") as f:
+            json.dump(playlist_paths, f, indent=4)
+
+        return jsonify({"status": "error", "message": f"Directory {path} does not exist. Removed from sync list."}), 400
+
+    return jsonify({"status": "success", 
+                    "message": f"Playlist synced successfully"}), 200
+    
+
+
+"""Download a list of songs from Spotify using spotdl"""
+def spotdl_download(urls: list, path):
+    global current_process # Use global so download can be cancelled by another function
+    if (os.path.isdir(path) and (len(urls) > 0)):
+
+        # Convert URLs to a single string for the command
+        query_string = " ".join([f"'{url}'" for url in urls])
+        formatted_path = f"'{path}/{{artist}} - {{title}}.{{output-ext}}'"
+
+        command = ["spotdl", "download", query_string, "--output", formatted_path]
+
+        if spotify_access_token != "":
+            command.append("--user-auth")
+            command.append("--auth-token")
+            command.append(spotify_access_token)
+
+        command = " ".join(command)
+        try: 
+            current_process = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+                )
+            
+            # Wait for the process to complete and capture the output
+            stdout, stderr = current_process.communicate()
+            
+        except SpotifyException as se:
+            return jsonify({'error': se, 'message': 'Spotify error while downloading'}), 500
+        except Exception as e:
+            return jsonify({'error': e, 'message': 'Error while downloading'}), 500
+        
+        return jsonify({"status": "success", "message": "Download started", "stdout": stdout, "stderr": stderr}), 200
+    else:
+        return jsonify({"status": "error", "message": f"Invalid path or missing urls: {path, urls}", "path": path, "urls": urls}), 400
+
 
 """Get metadata from Spotify playlists, MORE TO COME"""
 @app.route('/get-metadata', methods=['POST'])
@@ -337,19 +399,11 @@ def get_playlist_metadata(url):
             return jsonify({'error': se, 'message': 'Error getting song metadata from Spotify'})
         except Exception as e:
             return jsonify({'error': e, 'message': 'Error formatting metadata'})
-
-    formatted_metadata = {
+    return {
         "type": "sync",
         "query": [url],
         "songs": all_tracks
     }
-
-
-    return formatted_metadata
-
-        
-
-
 
 # def get_playlist_metadata(url):
 #     # Extract playlist ID from URL
