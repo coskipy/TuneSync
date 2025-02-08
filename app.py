@@ -2,7 +2,7 @@ from glob import glob
 import json
 from pathlib import Path
 import re
-from flask import Flask, render_template, request, jsonify, redirect
+from flask import Flask, render_template, request, jsonify, redirect, session
 from flask_cors import CORS
 import subprocess
 import logging
@@ -13,9 +13,12 @@ from spotipy.exceptions import SpotifyException
 from spotipy.oauth2 import SpotifyOAuth
 import time
 from functools import lru_cache
+from dotenv import load_dotenv
 
+load_dotenv()  # Load from .env file
 
 app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY") # Set a secret key for session management
 CORS(app)  # Allow all origins
 syncedDirsJson = "syncedDirs.json"
 
@@ -29,8 +32,8 @@ current_process = None
 
 # Set up the Spotify OAuth object
 sp_oauth = SpotifyOAuth(
-    client_id="cde55a79f546483bad4e30ec92c7c45b",
-    client_secret="b31d3b6144334d5088c1b371e9367ef2",
+    client_id=os.getenv("SPOTIFY_CLIENT_ID"),
+    client_secret=os.getenv("SPOTIFY_CLIENT_SECRET"),
     redirect_uri="http://127.0.0.1:5000/callback",  # Must match Spotify dev dashboard
     scope="user-library-read playlist-read-private",
     cache_path="token_cache.json"  # Store tokens here
@@ -74,14 +77,20 @@ def get_current_user():
     if not sp_client:
         return jsonify({"error": "User not authenticated. Please log in."}), 401
 
-    user_info = sp_client.me()
-    return jsonify(user_info)
+    try:
+        user_info = sp_client.me()
+        return jsonify(user_info)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 """OAuth callback route"""
 @app.route('/callback')
 def callback():
     code = request.args.get("code")
     
+    if not code:
+        return jsonify({"error": "Missing authorization code"}), 400
+
     try:
         token_info = sp_oauth.get_access_token(code)
     except Exception as e:
@@ -90,16 +99,48 @@ def callback():
     if not token_info:
         return jsonify({"error": "Failed to authenticate"}), 400
     
-    spotify_access_token = token_info["access_token"]
+    # Store token in session instead of global variable
+    session["spotify_access_token"] = token_info["access_token"]
+    session["refresh_token"] = token_info["refresh_token"]
     
-    # Use the access token to get the user's profile
-    sp = spotipy.Spotify(auth=spotify_access_token)
-    user_info = sp.current_user()  # Fetch the current user's info
+    # Fetch user info
+    sp_client = get_spotify_client()
+    user_info = sp_client.me()
+    
+    # Redirect with username
+    return redirect(f"/?user_name={user_info['display_name']}")
 
-    user_name = user_info['display_name']  # Get the user's name
+"""Get user playlists from Spotify"""
+@app.route('/get-user-playlists', methods=['GET'])
+def get_user_playlists():
+    # Ensure user is authenticated
+    sp_client = get_spotify_client()
 
-    # Redirect to the home page with the user's name and access token as query parameters
-    return redirect(f"/?user_name={user_name}&access_token={spotify_access_token}")
+    if not sp_client:
+        return jsonify({"error": "User not authenticated. Please log in."}), 401
+    
+    offset = 0
+    user_playlists = []
+    # return sp_client.current_user_playlists()
+    while True:
+        # Fetch the user's playlists
+        batch = sp_client.current_user_playlists(limit=50, offset=offset).get('items', [])
+        if not batch:
+            break
+        user_playlists.extend(batch)
+        offset += 50
+
+    return user_playlists
+    
+    # Prepare the playlists in a JSON-friendly format   
+    playlist_data = []
+    for playlist in user_playlists['items']:
+        playlist_data.append({
+            'name': playlist['name'],
+            'url': playlist['external_urls']['spotify']
+        })
+    
+
 
 
 """Function to add a path string to the JSON file"""
@@ -145,7 +186,7 @@ def download():
     if ("/playlist/" in url):
         add_path_to_json(syncedDirsJson, path) # Add target dir to sync cache
         playlist_metadata = get_playlist_metadata(url)
-        
+
         # Create metadata file within the target directory for use syncing the playlist
         with open(os.path.join(path, "metadata.json"), "w") as temp_file:
             json.dump(playlist_metadata, temp_file, indent=4)
@@ -200,23 +241,13 @@ def sync_selected():
         # Get the list of paths
         paths = data["paths"]
 
-        number_synced = 0
+        num_synced = 0
 
         for path in paths:
-            try:
-                current_process = subprocess.Popen(
-                    ["spotdl", "sync", os.path.cwjoin(path, "SyncData.spotdl"), "--output", path],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                stdout, stderr = current_process.communicate()
-                number_synced += 1
+            result, responseCode = sync_directory(path)
+            num_synced += 1
 
-            except Exception as e:
-                return jsonify({"status": "error", "message": str(e)}), 500
-
-        return jsonify({"status": "success", "message": f"Successfully synced {number_synced} playlists."}), 200
+        return jsonify({"status": "success", "message": f"Successfully synced {num_synced} playlists."}), 200
 
     except Exception as e:
         return jsonify({"message": f"An error occurred: {str(e)}"}), 500
@@ -284,24 +315,22 @@ def sync_directory(path):
 """Download a list of songs from Spotify using spotdl"""
 def spotdl_download(urls: list, path):
     global current_process # Use global so download can be cancelled by another function
+    get_spotify_client() # Refresh token if needed
+
     if (os.path.isdir(path) and (len(urls) > 0)):
 
         # Convert URLs to a single string for the command
-        query_string = " ".join([f"'{url}'" for url in urls])
-        formatted_path = f"'{path}/{{artist}} - {{title}}.{{output-ext}}'"
+        formatted_path = f"{path}/{{artist}} - {{title}}.{{output-ext}}"
 
-        command = ["spotdl", "download", query_string, "--output", formatted_path]
+        command = ["spotdl", "download"] + urls + ["--output", formatted_path]
 
-        if spotify_access_token != "":
-            command.append("--user-auth")
-            command.append("--auth-token")
-            command.append(spotify_access_token)
+        if spotify_access_token:
+            command += ["--user-auth", "--auth-token", spotify_access_token]
 
-        command = " ".join(command)
+        print(command, flush=True)
         try: 
             current_process = subprocess.Popen(
                 command,
-                shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True
@@ -315,7 +344,7 @@ def spotdl_download(urls: list, path):
         except Exception as e:
             return jsonify({'error': e, 'message': 'Error while downloading'}), 500
         
-        return jsonify({"status": "success", "message": "Download started", "stdout": stdout, "stderr": stderr}), 200
+        return jsonify({"status": "success", "message": f"Download started. stdout: {stdout} stderr: {stderr}"}), 200
     else:
         return jsonify({"status": "error", "message": f"Invalid path or missing urls: {path, urls}", "path": path, "urls": urls}), 400
 
@@ -404,241 +433,6 @@ def get_playlist_metadata(url):
         "query": [url],
         "songs": all_tracks
     }
-
-# def get_playlist_metadata(url):
-#     # Extract playlist ID from URL
-#     playlist_id = url.split('/')[-1].split('?')[0]
-    
-#     # Fetch playlist metadata to get name and total tracks
-#     playlist = sp.playlist(playlist_id)
-#     playlist_name = playlist['name']
-#     total_tracks = playlist['tracks']['total']
-    
-#     offset = 0
-#     limit = 25  # Reduced batch size
-#     all_tracks = []
-    
-#     # Pre-fetch all artist IDs in the playlist first
-#     all_artist_ids = set()
-    
-#     # First pass: Collect all artist IDs
-#     while True:
-#         results = sp.playlist_tracks(playlist_id, offset=offset, limit=limit)
-#         tracks = results['items']
-        
-#         if not tracks:
-#             break
-            
-#         for track_item in tracks:
-#             if track_item['track']:
-#                 all_artist_ids.update(artist['id'] for artist in track_item['track']['artists'])
-        
-#         offset += limit
-#         if offset >= results['total']:
-#             break
-    
-#     # Batch fetch all artists (50 per request - Spotify's max)
-#     artists_cache = {}
-#     artist_id_list = list(all_artist_ids)
-#     for i in range(0, len(artist_id_list), 50):
-#         batch = artist_id_list[i:i+50]
-#         artists = sp.artists(batch)['artists']
-#         for artist in artists:
-#             if artist:  # Skip invalid responses
-#                 artists_cache[artist['id']] = artist
-#         time.sleep(0.5)  # Add delay between batches
-    
-#     # Second pass: Build track data using cache
-#     offset = 0
-#     while True:
-#         results = sp.playlist_tracks(playlist_id, offset=offset, limit=limit)
-#         tracks = results['items']
-        
-#         if not tracks:
-#             break
-            
-#         batch = []
-#         for idx, track_item in enumerate(tracks):
-#             track_data = track_item['track']
-#             if not track_data:
-#                 continue
-                
-#             album_data = track_data['album']
-            
-#             # Get genres from cache
-#             artists_genres = []
-#             for artist in track_data['artists']:
-#                 artist_info = artists_cache.get(artist['id'], {})
-#                 artists_genres.extend(artist_info.get('genres', []))
-            
-#             # Build track info (keep your existing structure)
-#             track_info = {
-#                 "name": track_data.get('name'),
-#                 "artists": [artist.get('name') for artist in track_data.get('artists', [])],
-#                 "artist": track_data['artists'][0]['name'] if track_data.get('artists') else '',
-#                 "genres": artists_genres,
-#                 "disc_number": track_data.get('disc_number', 0),
-#                 "album_name": album_data.get('name'),
-#                 "album_artist": album_data['artists'][0]['name'] if album_data.get('artists') else '',
-#                 "duration": track_data.get('duration_ms', 0) // 1000,
-#                 "year": album_data.get('release_date', '')[:4] if album_data.get('release_date') else '',
-#                 "date": album_data.get('release_date', ''),
-#                 "track_number": track_data.get('track_number', 0),
-#                 "tracks_count": album_data.get('total_tracks', 0),
-#                 "song_id": track_data.get('id'),
-#                 "explicit": track_data.get('explicit', False),
-#                 "publisher": album_data.get('label', ''),
-#                 "url": track_data['external_urls'].get('spotify', ''),
-#                 "isrc": track_data.get('external_ids', {}).get('isrc', ''),
-#                 "cover_url": album_data['images'][0]['url'] if album_data.get('images') else '',
-#                 "copyright_text": f"{album_data.get('release_date', '')[:4]} {album_data.get('label', '')}".strip(),
-#                 "download_url": None,
-#                 "lyrics": None,
-#                 "popularity": track_data.get('popularity', 0),
-#                 "album_id": album_data.get('id'),
-#                 "list_name": playlist_name,
-#                 "list_url": f"https://open.spotify.com/playlist/{playlist_id}",
-#                 "list_position": offset + idx,  # Correct playlist position
-#                 "list_length": total_tracks,
-#                 "artist_id": track_data['artists'][0]['id'] if track_data.get('artists') else '',
-#                 "album_type": album_data.get('album_type', '')
-#             }
-#             batch.append(track_info)
-        
-#         all_tracks.extend(batch)
-#         offset += limit
-#         if offset >= results['total']:
-#             break
-        
-#         time.sleep(1)  # Add delay between track batches
-    
-#     return all_tracks
-
-# def batch_fetch_artists(artist_ids):
-#     artists_cache = {}
-#     for i in range(0, len(artist_ids), 50):
-#         batch = artist_ids[i:i+50]
-        
-#         # Get rate limit status
-#         remaining = int(sp.last_response.headers.get('X-RateLimit-Remaining', 30)) if i > 0 else 30
-        
-#         if remaining < 5:
-#             reset = int(sp.last_response.headers.get('X-RateLimit-Reset', 30))
-#             time.sleep(reset + 2)
-        
-#         artists = sp.artists(batch)['artists']
-        
-#         # Store in cache
-#         for artist in artists:
-#             if artist:
-#                 artists_cache[artist['id']] = artist
-                
-#         # Dynamic delay based on remaining capacity
-#         time.sleep(max(0.5, (60 / remaining) if remaining > 0 else 5))
-    
-#     return artists_cache
-
-# def get_playlist_metadata(url):
-#     playlist_id = url.split('/')[-1].split('?')[0]
-#     playlist = sp.playlist(playlist_id)
-#     playlist_name = playlist['name']
-#     total_tracks = playlist['tracks']['total']
-    
-#     offset = 0
-#     limit = 50  # Use maximum allowed batch size
-#     all_tracks = []
-#     all_artist_ids = set()
-
-#     try:
-#         results = sp.playlist_tracks
-
-
-    
-#     # Single pass through tracks
-#     while True:
-#         try:
-#             results = sp.playlist_tracks(playlist_id, offset=offset, limit=limit)
-#             remaining = int(results['headers'].get('X-RateLimit-Remaining', 30))
-            
-#             if remaining < 10:
-#                 reset = int(results['headers'].get('X-RateLimit-Reset', 30))
-#                 time.sleep(reset + 2)
-                
-#             tracks = results['items']
-            
-#             # Collect artist IDs and process tracks
-#             current_batch_artist_ids = set()
-#             for track_item in tracks:
-#                 if not track_item['track']:
-#                     continue
-                
-#                 track_data = track_item['track']
-#                 artists = track_data['artists']
-                
-#                 # Collect artist IDs
-#                 artist_ids = {a['id'] for a in artists}
-#                 current_batch_artist_ids.update(artist_ids)
-#                 all_artist_ids.update(artist_ids)
-                
-#                 # Store basic track info
-#                 all_tracks.append({
-#                     "name": track_data.get('name'),
-#                     "artists": [a['name'] for a in artists],
-#                     "artist": track_data['artists'][0]['name'] if track_data.get('artists') else '',
-#                     "genres": artists_genres,
-#                     "disc_number": track_data.get('disc_number', 0),
-#                     "album_name": album_data.get('name'),
-#                     "album_artist": album_data['artists'][0]['name'] if album_data.get('artists') else '',
-#                     "duration": track_data.get('duration_ms', 0) // 1000,
-#                     "year": album_data.get('release_date', '')[:4] if album_data.get('release_date') else '',
-#                     "date": album_data.get('release_date', ''),
-#                     "track_number": track_data.get('track_number', 0),
-#                     "tracks_count": album_data.get('total_tracks', 0),
-#                     "song_id": track_data.get('id'),
-#                     "explicit": track_data.get('explicit', False),
-#                     "publisher": album_data.get('label', ''),
-#                     "url": track_data['external_urls'].get('spotify', ''),
-#                     "isrc": track_data.get('external_ids', {}).get('isrc', ''),
-#                     "cover_url": album_data['images'][0]['url'] if album_data.get('images') else '',
-#                     "copyright_text": f"{album_data.get('release_date', '')[:4]} {album_data.get('label', '')}".strip(),
-#                     "download_url": None,
-#                     "lyrics": None,
-#                     "popularity": track_data.get('popularity', 0),
-#                     "album_id": album_data.get('id'),
-#                     "list_name": playlist_name,
-#                     "list_url": f"https://open.spotify.com/playlist/{playlist_id}",
-#                     "list_position": offset + idx,  # Correct playlist position
-#                     "list_length": total_tracks,
-#                     "artist_id": track_data['artists'][0]['id'] if track_data.get('artists') else '',
-#                     "album_type": album_data.get('album_type', '')
-#                 })
-            
-#             # Fetch artists for this batch
-#             artists_cache = batch_fetch_artists(list(current_batch_artist_ids))
-            
-#             # Add genres to tracks
-#             for track in all_tracks[-len(tracks):]:
-#                 track["genres"] = []
-#                 for artist_id in [a['id'] for a in track['artists']]:
-#                     artist = artists_cache.get(artist_id)
-#                     if artist:
-#                         track["genres"].extend(artist.get('genres', []))
-            
-#             offset += limit
-#             if offset >= results['total']:
-#                 break
-                
-#             # Dynamic delay between track batches
-#             time.sleep(max(1, (60 / remaining) if remaining > 0 else 5))
-            
-#         except SpotifyException as e:
-#             if e.http_status == 429:
-#                 retry_after = int(e.headers.get("Retry-After", 30))
-#                 time.sleep(retry_after)
-#                 continue
-#             raise
-    
-#     return all_tracks
 
 if __name__ == '__main__':
     app.run(debug=True)
