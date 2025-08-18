@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import subprocess
 import shutil
+import time
 from typing import Optional, Dict, Any, List
 
 from yt_dlp import YoutubeDL
@@ -68,6 +69,8 @@ def _human_time(sec: Optional[float]) -> str:
 class DownloadResult:
     ok: bool
     track_id: Optional[str] = None
+    artist: Optional[str] = None
+    title: Optional[str] = None
     final_path: Optional[Path] = None
     source_url: Optional[str] = None
     ext: Optional[str] = None
@@ -211,7 +214,7 @@ def download_track(
       3) If cached URL fails, clear cache and fall back to fresh search.
     """
     if not _have_ffmpeg():
-        return DownloadResult(ok=False, track_id=track_id, error="ffmpeg not found on PATH")
+        return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, error="ffmpeg not found on PATH")
 
     label = f"{artist} - {title}"
     try:
@@ -224,7 +227,7 @@ def download_track(
             if p.exists():
                 if progress:
                     print(f"• {label}\n  ✓ {label}  → {p.name}  (exists)")
-                return DownloadResult(ok=True, track_id=track_id, final_path=p, source_url=None, ext=ext, abr_kbps=None, transcoded=False)
+                return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title, final_path=p, source_url=None, ext=ext, abr_kbps=None, transcoded=False)
 
         hooks = [_make_progress_hook(label)] if progress else []
 
@@ -272,11 +275,17 @@ def download_track(
                     (out_root / f"{base}.mp3"),
                     (out_root / f"{base}.aac"),
                 ]
-                for p in candidates:
-                    if p and p.exists():
-                        final = p; break
+                for _ in range(5):
+                    for p in candidates:
+                        if p and p.exists():
+                            final = p
+                            break
+                    if final:
+                        break
+                    time.sleep(0.5)
                 if not final:
-                    return DownloadResult(ok=False, track_id=track_id, source_url=u,
+                    return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
+                                          source_url=u,
                                           error="Download reported success but file not found")
 
                 ext = final.suffix.lstrip(".").lower()
@@ -284,14 +293,16 @@ def download_track(
                     abr = int(info["abr"]) if isinstance(info.get("abr"), (int, float)) else None
                     if progress:
                         print(f"  ✓ {label}  → {final.name}")
-                    return DownloadResult(ok=True, track_id=track_id, final_path=final,
+                    return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title,
+                                          final_path=final,
                                           source_url=u, ext=ext, abr_kbps=abr, transcoded=False)
 
                 m4a_path = (out_root / base).with_suffix(".m4a")
                 _ffmpeg_transcode_to_m4a(final, m4a_path, aac_kbps=aac_kbps)
                 if progress:
                     print(f"  ✓ {label}  → {m4a_path.name}  (transcoded)")
-                return DownloadResult(ok=True, track_id=track_id, final_path=m4a_path,
+                return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title,
+                                      final_path=m4a_path,
                                       source_url=u, ext="m4a", abr_kbps=aac_kbps, transcoded=True)
 
         # Try cached first; if it fails, drop cache and fall back to search
@@ -311,12 +322,12 @@ def download_track(
         chosen = _search_best(artist, title, duration_ms)
         if not chosen:
             print(f"  ✗ {label}  (no suitable source found)")
-            return DownloadResult(ok=False, track_id=track_id, error="No suitable YouTube match found")
+            return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, error="No suitable YouTube match found")
 
         url = chosen.get("webpage_url") or chosen.get("url")
         if not url:
             print(f"  ✗ {label}  (missing URL)")
-            return DownloadResult(ok=False, track_id=track_id, error="Selected entry has no URL")
+            return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, error="Selected entry has no URL")
 
         # Persist cache for next time
         try:
@@ -333,7 +344,7 @@ def download_track(
         return _do_download(url)
 
     except Exception as e:
-        return DownloadResult(ok=False, track_id=track_id, error=_classify_error(str(e)))
+        return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, error=_classify_error(str(e)))
 
 
 # ---------------------------
