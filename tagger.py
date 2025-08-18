@@ -147,44 +147,63 @@ def tag_tracks_in_db(download_root: Path, track_ids: Optional[Iterable[str]] = N
     skipped = 0
     errors = 0
 
+    path_map = {}
     for r in rows:
         tid = r["track_id"]
         abs_path = resolve_path(download_root, r["file_path"])
         if not abs_path.exists():
             skipped += 1
             continue
+        path_map[tid] = abs_path
 
+    if path_map:
         try:
-            full = SpotifyClient.get_track_details(tid)
-            cover_bytes, mime = _fetch_cover(full.get("cover_url"))
+            metas = SpotifyClient.get_tracks_details(list(path_map.keys()))
+        except Exception:
+            errors += len(path_map)
+            return {"tagged": done, "skipped": skipped, "errors": errors}
 
-            meta = {
-                "title":        full["title"],
-                "artist":       full["artist"],
-                "album_artist": full["album_artist"],
-                "album":        full["album"],
-                "track_number": full.get("track_number"),
-                "genres":       full.get("genres") or [],
-                "release_date": full.get("release_date"),
-            }
-
-            ext = abs_path.suffix.lower()
-            if ext == ".m4a" or ext == ".mp4":
-                _tag_m4a(abs_path, meta, cover_bytes, mime)
-            elif ext == ".mp3":
-                _tag_mp3(abs_path, meta, cover_bytes, mime)
-            elif ext == ".flac":
-                _tag_flac(abs_path, meta, cover_bytes, mime)
-            else:
-                # leave WAV/AIFF/etc untagged
-                skipped += 1
+        meta_ids = set()
+        for full in metas:
+            tid = full["id"]
+            meta_ids.add(tid)
+            abs_path = path_map.get(tid)
+            if not abs_path:
                 continue
 
-            done += 1
-        except MutagenError:
-            errors += 1
-        except Exception:
-            # If a network hiccup or Spotify outage happens mid-run, just count error and continue
-            errors += 1
+            try:
+                cover_bytes, mime = _fetch_cover(full.get("cover_url"))
+
+                meta = {
+                    "title":        full["title"],
+                    "artist":       full["artist"],
+                    "album_artist": full["album_artist"],
+                    "album":        full["album"],
+                    "track_number": full.get("track_number"),
+                    "genres":       full.get("genres") or [],
+                    "release_date": full.get("release_date"),
+                }
+
+                ext = abs_path.suffix.lower()
+                if ext == ".m4a" or ext == ".mp4":
+                    _tag_m4a(abs_path, meta, cover_bytes, mime)
+                elif ext == ".mp3":
+                    _tag_mp3(abs_path, meta, cover_bytes, mime)
+                elif ext == ".flac":
+                    _tag_flac(abs_path, meta, cover_bytes, mime)
+                else:
+                    # leave WAV/AIFF/etc untagged
+                    skipped += 1
+                    continue
+
+                done += 1
+            except MutagenError:
+                errors += 1
+            except Exception:
+                # If a network hiccup or Spotify outage happens mid-run, just count error and continue
+                errors += 1
+
+        missing = set(path_map.keys()) - meta_ids
+        errors += len(missing)
 
     return {"tagged": done, "skipped": skipped, "errors": errors}

@@ -155,3 +155,86 @@ class SpotifyClient:
             "cover_url": cover_url,
             "genres": genres,
         }
+
+    @classmethod
+    def get_tracks_details(cls, track_ids: List[str]) -> List[Dict]:
+        """
+        Batch variant of ``get_track_details``.
+
+        Retrieves metadata for multiple tracks, fetching primary artist genres in
+        batches and updating the in-memory cache. Returns a list of metadata
+        dictionaries with the same structure as ``get_track_details``.
+        """
+        if not track_ids:
+            return []
+
+        sp = cls.login()
+
+        # Fetch track objects in batches of <=50
+        tracks: List[Dict] = []
+        for i in range(0, len(track_ids), 50):
+            chunk = track_ids[i : i + 50]
+            res = cls._retry(sp.tracks, chunk)
+            for tr in res.get("tracks", []):
+                if tr:
+                    tracks.append(tr)
+
+        # Collect primary artist IDs that are not yet cached
+        artist_ids: List[str] = []
+        for tr in tracks:
+            a_id = tr["artists"][0]["id"]
+            if a_id not in cls.cache.artist_genres:
+                artist_ids.append(a_id)
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique_artist_ids = []
+        for a in artist_ids:
+            if a not in seen:
+                seen.add(a)
+                unique_artist_ids.append(a)
+
+        # Fetch artist genres in batches of <=50 and update cache
+        for i in range(0, len(unique_artist_ids), 50):
+            chunk = unique_artist_ids[i : i + 50]
+            arts = cls._retry(sp.artists, chunk)
+            for art in arts.get("artists", []):
+                cls.cache.artist_genres[art["id"]] = art.get("genres") or []
+
+        # Build metadata dicts matching ``get_track_details`` structure
+        metas: List[Dict] = []
+        for tr in tracks:
+            album = tr["album"]
+
+            images = album.get("images") or []
+            cover_url = None
+            if images:
+                cover_url = sorted(
+                    images, key=lambda x: (x.get("width") or 0), reverse=True
+                )[0]["url"]
+
+            primary_artist = tr["artists"][0]
+            genres = cls.cache.artist_genres.get(primary_artist["id"], [])
+
+            album_artist = primary_artist["name"]
+            if album.get("artists"):
+                album_artist = album["artists"][0]["name"]
+
+            metas.append(
+                {
+                    "id": tr["id"],
+                    "title": tr["name"],
+                    "artists": [a["name"] for a in tr["artists"]],
+                    "artist": ", ".join(a["name"] for a in tr["artists"]),
+                    "album": album["name"],
+                    "album_artist": album_artist,
+                    "track_number": tr.get("track_number"),
+                    "disc_number": tr.get("disc_number"),
+                    "duration_ms": tr.get("duration_ms"),
+                    "release_date": album.get("release_date"),
+                    "cover_url": cover_url,
+                    "genres": genres,
+                }
+            )
+
+        return metas
