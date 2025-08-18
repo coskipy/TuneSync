@@ -98,14 +98,14 @@ if __name__ == "__main__":
     if not_found:
         print("\nTracks not found:")
         for f in not_found[:15]:
-            print(f"  - {f.track_id}  {f.error}")
+            print(f"  - {f.artist} - {f.title} ({f.track_id})  {f.error}")
         if len(not_found) > 15:
             print(f"  … and {len(not_found)-15} more")
 
     if other_errs:
         print("\nOther errors:")
         for f in other_errs[:10]:
-            print(f"  - {f.track_id}  {f.error}")
+            print(f"  - {f.artist} - {f.title} ({f.track_id})  {f.error}")
         if len(other_errs) > 10:
             print(f"  … and {len(other_errs)-10} more")
 
