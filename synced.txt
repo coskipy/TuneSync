@@ -1,1 +1,4 @@
-https://open.spotify.com/playlist/6ycPSy0RiCN1sDqK8lgbOv?si=af9f97392c5e4c4f
+WARM CHILL = https://open.spotify.com/playlist/3wGbJDd4wF2uHsp75VXzNg?si=5397d4c02dd94881
+SPEAK EASY = https://open.spotify.com/playlist/6ycPSy0RiCN1sDqK8lgbOv?si=9b8f3c8d2d2c4355
+BUNKER = https://open.spotify.com/playlist/7xlq9QkLH9KOz5XyPkOX11?si=d869e367e1b14645
+SPEED DEALER = https://open.spotify.com/playlist/2p5NgOAQWbnL8ckolunsnU?si=3f4b800221b04649
