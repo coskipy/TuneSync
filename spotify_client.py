@@ -118,25 +118,18 @@ class SpotifyClient:
         cls.cache.artist_genres[artist_id] = genres
         return genres
 
-    @classmethod
-    def get_track_details(cls, track_id: str) -> Dict:
-        """
-        Rich metadata for tagging:
-          title, artist(s), album, album_artist, track/disc numbers,
-          duration, release_date, cover_url, genres (from primary artist)
-        """
-        sp = cls.login()
-        tr = cls._retry(sp.track, track_id)
+    @staticmethod
+    def _build_meta(tr: Dict, genres: List[str]) -> Dict:
         album = tr["album"]
 
         images = album.get("images") or []
         cover_url = None
         if images:
-            cover_url = sorted(images, key=lambda x: (x.get("width") or 0), reverse=True)[0]["url"]
+            cover_url = sorted(
+                images, key=lambda x: (x.get("width") or 0), reverse=True
+            )[0]["url"]
 
         primary_artist = tr["artists"][0]
-        genres = cls._get_artist_genres(primary_artist["id"])
-
         album_artist = primary_artist["name"]
         if album.get("artists"):
             album_artist = album["artists"][0]["name"]
@@ -157,6 +150,19 @@ class SpotifyClient:
         }
 
     @classmethod
+    def get_track_details(cls, track_id: str) -> Dict:
+        """
+        Rich metadata for tagging:
+          title, artist(s), album, album_artist, track/disc numbers,
+          duration, release_date, cover_url, genres (from primary artist)
+        """
+        sp = cls.login()
+        tr = cls._retry(sp.track, track_id)
+        primary_artist = tr["artists"][0]
+        genres = cls._get_artist_genres(primary_artist["id"])
+        return cls._build_meta(tr, genres)
+
+    @classmethod
     def get_tracks_details(cls, track_ids: List[str]) -> List[Dict]:
         """
         Batch variant of ``get_track_details``.
@@ -167,6 +173,9 @@ class SpotifyClient:
         """
         if not track_ids:
             return []
+
+        # Deduplicate while preserving order to avoid redundant lookups
+        track_ids = list(dict.fromkeys(track_ids))
 
         sp = cls.login()
 
@@ -204,37 +213,8 @@ class SpotifyClient:
         # Build metadata dicts matching ``get_track_details`` structure
         metas: List[Dict] = []
         for tr in tracks:
-            album = tr["album"]
-
-            images = album.get("images") or []
-            cover_url = None
-            if images:
-                cover_url = sorted(
-                    images, key=lambda x: (x.get("width") or 0), reverse=True
-                )[0]["url"]
-
             primary_artist = tr["artists"][0]
             genres = cls.cache.artist_genres.get(primary_artist["id"], [])
-
-            album_artist = primary_artist["name"]
-            if album.get("artists"):
-                album_artist = album["artists"][0]["name"]
-
-            metas.append(
-                {
-                    "id": tr["id"],
-                    "title": tr["name"],
-                    "artists": [a["name"] for a in tr["artists"]],
-                    "artist": ", ".join(a["name"] for a in tr["artists"]),
-                    "album": album["name"],
-                    "album_artist": album_artist,
-                    "track_number": tr.get("track_number"),
-                    "disc_number": tr.get("disc_number"),
-                    "duration_ms": tr.get("duration_ms"),
-                    "release_date": album.get("release_date"),
-                    "cover_url": cover_url,
-                    "genres": genres,
-                }
-            )
+            metas.append(cls._build_meta(tr, genres))
 
         return metas

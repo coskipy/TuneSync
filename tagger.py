@@ -163,13 +163,13 @@ def tag_tracks_in_db(download_root: Path, track_ids: Optional[Iterable[str]] = N
             errors += len(path_map)
             return {"tagged": done, "skipped": skipped, "errors": errors}
 
-        meta_ids = set()
+        remaining = set(path_map.keys())
         for full in metas:
             tid = full["id"]
-            meta_ids.add(tid)
             abs_path = path_map.get(tid)
             if not abs_path:
                 continue
+            remaining.discard(tid)
 
             try:
                 cover_bytes, mime = _fetch_cover(full.get("cover_url"))
@@ -203,7 +203,6 @@ def tag_tracks_in_db(download_root: Path, track_ids: Optional[Iterable[str]] = N
                 # If a network hiccup or Spotify outage happens mid-run, just count error and continue
                 errors += 1
 
-        missing = set(path_map.keys()) - meta_ids
-        errors += len(missing)
+        errors += len(remaining)
 
     return {"tagged": done, "skipped": skipped, "errors": errors}
