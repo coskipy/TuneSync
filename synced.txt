@@ -2,3 +2,16 @@ WARM CHILL = https://open.spotify.com/playlist/3wGbJDd4wF2uHsp75VXzNg?si=5397d4c
 SPEAK EASY = https://open.spotify.com/playlist/6ycPSy0RiCN1sDqK8lgbOv?si=9b8f3c8d2d2c4355
 BUNKER = https://open.spotify.com/playlist/7xlq9QkLH9KOz5XyPkOX11?si=d869e367e1b14645
 SPEED DEALER = https://open.spotify.com/playlist/2p5NgOAQWbnL8ckolunsnU?si=3f4b800221b04649
+ACID = https://open.spotify.com/playlist/3iu7JoEClfkG7jcRjLqLmn?si=028078d41c1849d7
+BASSLINE = https://open.spotify.com/playlist/5zqaySXgDssWOpYRb3jgF4?si=d838013e429c447d
+CTRL ALT MIX = https://open.spotify.com/playlist/3cY864ETqgAtr0uY0wi7OA?si=d91b327d083e4aeb
+DEEP HEAT = https://open.spotify.com/playlist/3ObpQvSWqInuZbHaF6xBV3?si=a3deb373018f4c28
+DIMENSION FOUR = https://open.spotify.com/playlist/4DDW0cXeCpjE8octlaXvRZ?si=db771f39a50d477e
+GARBAGE = https://open.spotify.com/playlist/4XRlIyooExTDcqC5Qiru6V?si=a99a8a43a6c948ef
+HIGH DENSITY HOUSE = https://open.spotify.com/playlist/15XjLFsRNWtZ2ztZPXnjrz?si=5928cb5e4a1c403f
+HOUSE BROKER = https://open.spotify.com/playlist/6lsWtLVcQGG450wRbWddGL?si=2be7b3435dc6494a
+LAID BACK BEATS = https://open.spotify.com/playlist/02PEpgu3RZCeXCXsncau5q?si=77ae603ce01e4183
+LIGHT AND EASY = https://open.spotify.com/playlist/7qCH94iwhqN3OGnruU2hSY?si=698940ad82204cd3
+SUNNY DAY = https://open.spotify.com/playlist/2kgSSCpYRlknQMViZWncwJ?si=bc80d3d34b464eb4
+TRIP SITTER = https://open.spotify.com/playlist/3lCTj27beZ0GuVr4rIZVNg?si=f26baac4f1204e85
+GYLM (Ethan) = https://open.spotify.com/playlist/6ygCSYDzbNGVGjmAAgUy5Q?si=66f060026c684644
