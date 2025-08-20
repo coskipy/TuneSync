@@ -9,6 +9,7 @@ import time
 from typing import Optional, Dict, Any, List
 
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 
 from db import get_conn, get_cached_source, upsert_source, delete_source_cache
 
@@ -271,7 +272,7 @@ def download_track(
                 print(f"• {label}  (searching…)")
 
         def _do_download(u: str) -> DownloadResult:
-            ydl_opts = {
+            base_opts = {
                 "quiet": True,
                 "noplaylist": True,
                 "continuedl": True,
@@ -281,71 +282,96 @@ def download_track(
                 "ignoreerrors": False,
                 "overwrites": False,
                 "noprogress": True,
-                "format": "bestaudio[ext=m4a]/bestaudio[acodec^=aac]/bestaudio/best",
                 "outtmpl": str((out_root / base).with_suffix(".%(ext)s")),
                 "postprocessors": [],
                 "progress_hooks": hooks,
             }
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(u, download=True)
-                if info.get("_type") == "playlist" and info.get("entries"):
-                    info = info["entries"][0]
 
-                ext = (info.get("ext") or "").lower()
-                final = None
-                candidates = [
-                    (out_root / f"{base}.{ext}") if ext else None,
-                    (out_root / f"{base}.m4a"),
-                    (out_root / f"{base}.mp4"),
-                    (out_root / f"{base}.webm"),
-                    (out_root / f"{base}.opus"),
-                    (out_root / f"{base}.mp3"),
-                    (out_root / f"{base}.aac"),
-                ]
-                for _ in range(5):
-                    for p in candidates:
-                        if p and p.exists():
-                            final = p
+            def _attempt(fmt: str) -> DownloadResult:
+                opts = dict(base_opts)
+                opts["format"] = fmt
+                with YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(u, download=True)
+                    if info.get("_type") == "playlist" and info.get("entries"):
+                        info = info["entries"][0]
+
+                    ext = (info.get("ext") or "").lower()
+                    final = None
+                    candidates = [
+                        (out_root / f"{base}.{ext}") if ext else None,
+                        (out_root / f"{base}.m4a"),
+                        (out_root / f"{base}.mp4"),
+                        (out_root / f"{base}.webm"),
+                        (out_root / f"{base}.opus"),
+                        (out_root / f"{base}.mp3"),
+                        (out_root / f"{base}.aac"),
+                    ]
+                    for _ in range(5):
+                        for p in candidates:
+                            if p and p.exists():
+                                final = p
+                                break
+                        if final:
                             break
-                    if final:
-                        break
-                    time.sleep(0.5)
-                if not final:
-                    return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
-                                          source_url=u,
-                                          error="Download reported success but file not found")
+                        time.sleep(0.5)
+                    if not final:
+                        return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
+                                              source_url=u,
+                                              error="Download reported success but file not found")
 
-                if not _is_valid_audio_file(final):
-                    try:
-                        final.unlink()
-                    except Exception:
-                        pass
-                    return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
-                                          source_url=u, error="Downloaded file is corrupt or unreadable")
+                    if not _is_valid_audio_file(final):
+                        try:
+                            final.unlink()
+                        except Exception:
+                            pass
+                        return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
+                                              source_url=u, error="Downloaded file is corrupt or unreadable")
 
-                ext = final.suffix.lstrip(".").lower()
-                if ext in REKORDBOX_AUDIO_EXTS:
-                    abr = int(info["abr"]) if isinstance(info.get("abr"), (int, float)) else None
+                    ext = final.suffix.lstrip(".").lower()
+                    if ext in REKORDBOX_AUDIO_EXTS:
+                        abr = int(info["abr"]) if isinstance(info.get("abr"), (int, float)) else None
+                        if progress:
+                            print(f"  ✓ {label}  → {final.name}")
+                        return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title,
+                                              final_path=final,
+                                              source_url=u, ext=ext, abr_kbps=abr, transcoded=False)
+
+                    m4a_path = (out_root / base).with_suffix(".m4a")
+                    _ffmpeg_transcode_to_m4a(final, m4a_path, aac_kbps=aac_kbps)
+                    if not _is_valid_audio_file(m4a_path):
+                        try:
+                            m4a_path.unlink()
+                        except Exception:
+                            pass
+                        return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
+                                              source_url=u, error="Transcoded file is corrupt or unreadable")
                     if progress:
-                        print(f"  ✓ {label}  → {final.name}")
+                        print(f"  ✓ {label}  → {m4a_path.name}  (transcoded)")
                     return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title,
-                                          final_path=final,
-                                          source_url=u, ext=ext, abr_kbps=abr, transcoded=False)
+                                          final_path=m4a_path,
+                                          source_url=u, ext="m4a", abr_kbps=aac_kbps, transcoded=True)
 
-                m4a_path = (out_root / base).with_suffix(".m4a")
-                _ffmpeg_transcode_to_m4a(final, m4a_path, aac_kbps=aac_kbps)
-                if not _is_valid_audio_file(m4a_path):
-                    try:
-                        m4a_path.unlink()
-                    except Exception:
-                        pass
-                    return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
-                                          source_url=u, error="Transcoded file is corrupt or unreadable")
-                if progress:
-                    print(f"  ✓ {label}  → {m4a_path.name}  (transcoded)")
-                return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title,
-                                      final_path=m4a_path,
-                                      source_url=u, ext="m4a", abr_kbps=aac_kbps, transcoded=True)
+            try:
+                return _attempt("bestaudio[ext=m4a]/bestaudio[acodec^=aac]/bestaudio/best")
+            except DownloadError as e:
+                msg = str(e).lower()
+                if "requested format is not available" in msg or "http error 403" in msg:
+                    # fetch available formats and try each until one works
+                    with YoutubeDL({**base_opts, "skip_download": True, "format": None, "progress_hooks": []}) as ydl:
+                        info = ydl.extract_info(u, download=False)
+                    fmts = info.get("formats") or []
+                    audio_fmts = [f for f in fmts if f.get("acodec") != "none"]
+                    audio_fmts.sort(key=lambda f: f.get("abr") or f.get("tbr") or 0, reverse=True)
+                    for f in audio_fmts:
+                        fmt_id = f.get("format_id")
+                        if not fmt_id:
+                            continue
+                        try:
+                            return _attempt(fmt_id)
+                        except DownloadError:
+                            continue
+                return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
+                                      source_url=u, error=_classify_error(str(e)))
 
         # Try cached first; if it fails, drop cache and fall back to search
         if url:
