@@ -156,6 +156,22 @@ def _search_best(artist: str, title: str, duration_ms: Optional[int]) -> Optiona
 def _have_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
 
+
+def _is_valid_audio_file(p: Path) -> bool:
+    """Check whether a file exists and ffmpeg can read it."""
+    if not p.exists() or p.stat().st_size == 0:
+        return False
+    try:
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(p), "-f", "null", "-"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+        return True
+    except Exception:
+        return False
+
 def _ffmpeg_transcode_to_m4a(src: Path, dst: Path, aac_kbps: int = 192) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -217,22 +233,33 @@ def download_track(
         return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, error="ffmpeg not found on PATH")
 
     label = f"{artist} - {title}"
+    conn = get_conn()
     try:
         out_root.mkdir(parents=True, exist_ok=True)
         base = _sanitize(label)
 
-        # Short-circuit if a compatible file already exists
+        # Short-circuit if a compatible, valid file already exists
         for ext in ("m4a", "mp3", "flac", "wav", "aiff", "alac", "aac", "webm", "opus"):
             p = (out_root / base).with_suffix(f".{ext}")
             if p.exists():
-                if progress:
-                    print(f"• {label}\n  ✓ {label}  → {p.name}  (exists)")
-                return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title, final_path=p, source_url=None, ext=ext, abr_kbps=None, transcoded=False)
+                if _is_valid_audio_file(p):
+                    if progress:
+                        print(f"• {label}\n  ✓ {label}  → {p.name}  (exists)")
+                    return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title, final_path=p, source_url=None, ext=ext, abr_kbps=None, transcoded=False)
+                else:
+                    if progress:
+                        print(f"• {label}\n  ! {label}  → {p.name}  (corrupt, re-downloading)")
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+                    delete_source_cache(conn, track_id)
+                    conn.commit()
+                    break
 
         hooks = [_make_progress_hook(label)] if progress else []
 
         # 0) Try cache
-        conn = get_conn()
         cached = get_cached_source(conn, track_id)
         url = None
         if cached:
@@ -288,6 +315,14 @@ def download_track(
                                           source_url=u,
                                           error="Download reported success but file not found")
 
+                if not _is_valid_audio_file(final):
+                    try:
+                        final.unlink()
+                    except Exception:
+                        pass
+                    return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
+                                          source_url=u, error="Downloaded file is corrupt or unreadable")
+
                 ext = final.suffix.lstrip(".").lower()
                 if ext in REKORDBOX_AUDIO_EXTS:
                     abr = int(info["abr"]) if isinstance(info.get("abr"), (int, float)) else None
@@ -299,6 +334,13 @@ def download_track(
 
                 m4a_path = (out_root / base).with_suffix(".m4a")
                 _ffmpeg_transcode_to_m4a(final, m4a_path, aac_kbps=aac_kbps)
+                if not _is_valid_audio_file(m4a_path):
+                    try:
+                        m4a_path.unlink()
+                    except Exception:
+                        pass
+                    return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
+                                          source_url=u, error="Transcoded file is corrupt or unreadable")
                 if progress:
                     print(f"  ✓ {label}  → {m4a_path.name}  (transcoded)")
                 return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title,
@@ -311,11 +353,14 @@ def download_track(
                 res = _do_download(url)
                 if res.ok:
                     upsert_source(conn, track_id, url)
+                    conn.commit()
                     return res
                 else:
                     delete_source_cache(conn, track_id)
+                    conn.commit()
             except Exception:
                 delete_source_cache(conn, track_id)
+                conn.commit()
                 # fall through to fresh search
 
         # Fresh search
@@ -329,22 +374,27 @@ def download_track(
             print(f"  ✗ {label}  (missing URL)")
             return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, error="Selected entry has no URL")
 
-        # Persist cache for next time
-        try:
-            upsert_source(
-                conn, track_id, url,
-                title=chosen.get("title"),
-                uploader=chosen.get("uploader") or chosen.get("channel"),
-                duration_sec=int(chosen["duration"]) if isinstance(chosen.get("duration"), (int, float)) else None,
-            )
+        res = _do_download(url)
+        if res.ok:
+            try:
+                upsert_source(
+                    conn, track_id, url,
+                    title=chosen.get("title"),
+                    uploader=chosen.get("uploader") or chosen.get("channel"),
+                    duration_sec=int(chosen["duration"]) if isinstance(chosen.get("duration"), (int, float)) else None,
+                )
+                conn.commit()
+            except Exception:
+                pass
+        else:
+            delete_source_cache(conn, track_id)
             conn.commit()
-        except Exception:
-            pass
-
-        return _do_download(url)
+        return res
 
     except Exception as e:
         return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, error=_classify_error(str(e)))
+    finally:
+        conn.close()
 
 
 # ---------------------------
