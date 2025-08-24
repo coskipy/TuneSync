@@ -15,3 +15,14 @@ LIGHT AND EASY = https://open.spotify.com/playlist/7qCH94iwhqN3OGnruU2hSY?si=698
 SUNNY DAY = https://open.spotify.com/playlist/2kgSSCpYRlknQMViZWncwJ?si=bc80d3d34b464eb4
 TRIP SITTER = https://open.spotify.com/playlist/3lCTj27beZ0GuVr4rIZVNg?si=f26baac4f1204e85
 GYLM (Ethan) = https://open.spotify.com/playlist/6ygCSYDzbNGVGjmAAgUy5Q?si=66f060026c684644
+THE LAB = https://open.spotify.com/playlist/11qqnsxvzUSBP42BzE2fh5?si=61ccef0d5f5d4625
+CLING RAP = https://open.spotify.com/playlist/06q86mUh18xJPhB62r3Lx9?si=2eb7f780686f4306
+OLDSKOOL = https://open.spotify.com/playlist/14Vbnx1l47zEAW5dhP2PST?si=30098f8a4f564399
+MISC = https://open.spotify.com/playlist/6MnsMLI2GEe17gYdOLGy8V?si=b90cac11372749fe
+PROGDOG = https://open.spotify.com/playlist/1fvM9AVVBYoaDL5sClxG6A?si=1a3e837724de4a7e
+TECHYES = https://open.spotify.com/playlist/7hf8bzZp47ZasxGRueCzS7?si=db4b8b6c96af41c0
+ETHEREALITY = https://open.spotify.com/playlist/2l26sTUb0nnnYjVsOG0Ss9?si=a3d1779aa8624058
+CRISB = https://open.spotify.com/playlist/4CQ61TxB4535oqxIhiuZsK?si=3b1661bae5054ead
+RAPID RELIEF = https://open.spotify.com/playlist/4Jm69KFiEHByDFfD3dNy3a?si=598b8b833a0c43d6
+FACE MELTER = https://open.spotify.com/playlist/0X3oznmQjiLmGDzhqS4pu8?si=ebbae024479d4abd
+BASSFIELD = https://open.spotify.com/playlist/0hmv8SjS2b7vLlfXPxmH4n?si=35c0b3b0cb9d49ef

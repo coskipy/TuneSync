@@ -1,3 +1,4 @@
 .env
 synced.txt
 capsize.sqlite3
+synced_backup.txt
