@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 from db import init_db, get_conn, get_missing_tracks, attach_file
 from sync import sync, get_synced_alias_map
-from rescan import rescan_existing_files
+from rescan import rescan_existing_files, purge_bad_duration_files
 from downloader import download_missing_batch
 from tagger import tag_tracks_in_db
 from rekordbox_export import export_rekordbox_xml
@@ -41,6 +41,10 @@ if __name__ == "__main__":
         f"ambiguous {stats.get('ambiguous',0)}, unmatched {stats.get('unmatched',0)}, "
         f"skipped {stats.get('skipped',0)}"
     )
+
+    purge_stats = purge_bad_duration_files(DOWNLOAD_ROOT)
+    if purge_stats.get("purged"):
+        print(f"♻️  Removed {purge_stats['purged']} mismatched files")
 
     # 4) Recompute missing after rescan
     conn = get_conn()
