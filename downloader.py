@@ -9,6 +9,7 @@ import time
 from typing import Optional, Dict, Any, List
 
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 
 from db import get_conn, get_cached_source, upsert_source, delete_source_cache
 
@@ -279,7 +280,16 @@ def download_track(
                 print(f"• {label}  (searching…)")
 
         def _do_download(u: str) -> DownloadResult:
-            ydl_opts = {
+            """
+            Attempt to download ``u`` trying a couple of format fallbacks. Some
+            older YouTube videos only provide progressive formats (combined
+            audio+video) and lack a dedicated audio-only stream. yt-dlp raises
+            ``Requested format is not available`` in that case if we ask for
+            ``bestaudio``. To make downloads resilient, retry with ``best``
+            (video+audio) so we can transcode the audio afterwards.
+            """
+
+            base_opts = {
                 "quiet": True,
                 "noplaylist": True,
                 "continuedl": True,
@@ -289,55 +299,75 @@ def download_track(
                 "ignoreerrors": False,
                 "overwrites": False,
                 "noprogress": True,
-                "format": "bestaudio[ext=m4a]/bestaudio[acodec^=aac]/bestaudio",
                 "outtmpl": str((out_root / base).with_suffix(".%(ext)s")),
                 "postprocessors": [],
                 "progress_hooks": hooks,
             }
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(u, download=True)
-                if info.get("_type") == "playlist" and info.get("entries"):
-                    info = info["entries"][0]
 
-                ext = (info.get("ext") or "").lower()
-                final = None
-                candidates = [
-                    (out_root / f"{base}.{ext}") if ext else None,
-                    (out_root / f"{base}.m4a"),
-                    (out_root / f"{base}.webm"),
-                    (out_root / f"{base}.opus"),
-                    (out_root / f"{base}.mp3"),
-                    (out_root / f"{base}.aac"),
-                ]
-                for _ in range(5):
-                    for p in candidates:
-                        if p and p.exists():
-                            final = p
-                            break
-                    if final:
+            # Try audio-only first, then fall back to full video if necessary
+            formats = [
+                "bestaudio[ext=m4a]/bestaudio[acodec^=aac]/bestaudio",
+                "best",
+            ]
+
+            last_error: Optional[Exception] = None
+            for fmt in formats:
+                opts = dict(base_opts, format=fmt)
+                try:
+                    with YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(u, download=True)
+                    if info.get("_type") == "playlist" and info.get("entries"):
+                        info = info["entries"][0]
+                    break
+                except DownloadError as e:
+                    last_error = e
+                    # Only retry on format unavailability, otherwise re-raise
+                    if "Requested format is not available" in str(e) and fmt != "best":
+                        continue
+                    raise
+            else:
+                # All formats failed
+                raise last_error if last_error else RuntimeError("download failed")
+
+            ext = (info.get("ext") or "").lower()
+            final = None
+            candidates = [
+                (out_root / f"{base}.{ext}") if ext else None,
+                (out_root / f"{base}.m4a"),
+                (out_root / f"{base}.webm"),
+                (out_root / f"{base}.opus"),
+                (out_root / f"{base}.mp3"),
+                (out_root / f"{base}.aac"),
+            ]
+            for _ in range(5):
+                for p in candidates:
+                    if p and p.exists():
+                        final = p
                         break
-                    time.sleep(0.5)
-                if not final:
-                    return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
-                                          source_url=u,
-                                          error="Download reported success but file not found")
+                if final:
+                    break
+                time.sleep(0.5)
+            if not final:
+                return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
+                                      source_url=u,
+                                      error="Download reported success but file not found")
 
-                ext = final.suffix.lstrip(".").lower()
-                if ext in REKORDBOX_AUDIO_EXTS:
-                    abr = int(info["abr"]) if isinstance(info.get("abr"), (int, float)) else None
-                    if progress:
-                        print(f"  ✓ {label}  → {final.name}")
-                    return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title,
-                                          final_path=final,
-                                          source_url=u, ext=ext, abr_kbps=abr, transcoded=False)
-
-                m4a_path = (out_root / base).with_suffix(".m4a")
-                _ffmpeg_transcode_to_m4a(final, m4a_path, aac_kbps=aac_kbps)
+            ext = final.suffix.lstrip(".").lower()
+            if ext in REKORDBOX_AUDIO_EXTS:
+                abr = int(info["abr"]) if isinstance(info.get("abr"), (int, float)) else None
                 if progress:
-                    print(f"  ✓ {label}  → {m4a_path.name}  (transcoded)")
+                    print(f"  ✓ {label}  → {final.name}")
                 return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title,
-                                      final_path=m4a_path,
-                                      source_url=u, ext="m4a", abr_kbps=aac_kbps, transcoded=True)
+                                      final_path=final,
+                                      source_url=u, ext=ext, abr_kbps=abr, transcoded=False)
+
+            m4a_path = (out_root / base).with_suffix(".m4a")
+            _ffmpeg_transcode_to_m4a(final, m4a_path, aac_kbps=aac_kbps)
+            if progress:
+                print(f"  ✓ {label}  → {m4a_path.name}  (transcoded)")
+            return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title,
+                                  final_path=m4a_path,
+                                  source_url=u, ext="m4a", abr_kbps=aac_kbps, transcoded=True)
 
         # Try cached first; if it fails, drop cache and fall back to search
         if url:
