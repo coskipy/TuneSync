@@ -65,6 +65,18 @@ def _human_time(sec: Optional[float]) -> str:
     return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:d}:{s:02d}"
 
 
+def _safe_duration_seconds(path: Path) -> Optional[float]:
+    """Return duration in seconds using mutagen; None if unavailable."""
+    try:
+        from mutagen import File as MutagenFile
+        m = MutagenFile(path)
+        if m is not None and getattr(m, "info", None) and getattr(m.info, "length", None):
+            return float(m.info.length)
+    except Exception:
+        pass
+    return None
+
+
 @dataclass
 class DownloadResult:
     ok: bool
@@ -91,6 +103,12 @@ def _pick_best(entries: List[Dict[str, Any]], artist: str, title: str, target: O
         if not e:
             continue
         dur = e.get("duration")
+        # Skip entries wildly off from the expected duration to avoid long DJ sets
+        if target is not None and isinstance(dur, (int, float)):
+            max_diff = max(15.0, target * 0.2)  # allow ~20% drift or at least 15s
+            if abs(dur - target) > max_diff:
+                continue
+
         s = _title_score(artist, title, e.get("title") or "", e.get("uploader") or e.get("channel") or "")
         if target is not None and isinstance(dur, (int, float)):
             diff = abs(dur - target)
@@ -220,19 +238,36 @@ def download_track(
     try:
         out_root.mkdir(parents=True, exist_ok=True)
         base = _sanitize(label)
+        conn = get_conn()
 
-        # Short-circuit if a compatible file already exists
+        # Short-circuit if a compatible file already exists and duration matches
+        target_sec = (duration_ms or 0) / 1000.0 if duration_ms else None
         for ext in ("m4a", "mp3", "flac", "wav", "aiff", "alac", "aac", "webm", "opus"):
             p = (out_root / base).with_suffix(f".{ext}")
             if p.exists():
-                if progress:
-                    print(f"• {label}\n  ✓ {label}  → {p.name}  (exists)")
-                return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title, final_path=p, source_url=None, ext=ext, abr_kbps=None, transcoded=False)
+                if target_sec is not None:
+                    actual = _safe_duration_seconds(p)
+                    if actual is not None:
+                        max_diff = max(15.0, target_sec * 0.2)
+                        if abs(actual - target_sec) > max_diff:
+                            if progress:
+                                print(f"• {label}\n  ! {p.name} duration mismatch -> redownloading")
+                            try:
+                                p.unlink()
+                            except OSError:
+                                pass
+                            delete_source_cache(conn, track_id)
+                            break
+                else:
+                    pass
+                if p.exists():
+                    if progress:
+                        print(f"• {label}\n  ✓ {label}  → {p.name}  (exists)")
+                    return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title, final_path=p, source_url=None, ext=ext, abr_kbps=None, transcoded=False)
 
         hooks = [_make_progress_hook(label)] if progress else []
 
         # 0) Try cache
-        conn = get_conn()
         cached = get_cached_source(conn, track_id)
         url = None
         if cached:

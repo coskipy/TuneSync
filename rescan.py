@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Iterable, Set
 import re
 import unicodedata
 
-from db import get_conn, attach_file
+from db import get_conn, attach_file, resolve_path, delete_source_cache
 
 # Files Rekordbox handles (plus a couple we may transcode from)
 AUDIO_EXTS = {"m4a", "mp3", "aac", "wav", "aiff", "flac", "alac", "opus", "webm"}
@@ -170,3 +170,43 @@ def rescan_existing_files(download_root: Path, ignore_dirs: Iterable[str] | None
         "unmatched": unmatched,
         "skipped": skipped,
     }
+
+
+def purge_bad_duration_files(download_root: Path, *, max_ratio: float = 0.2, min_abs: float = 15.0) -> dict:
+    """
+    Remove files whose on-disk duration deviates too much from the track's Spotify
+    metadata. Purged tracks will be redownloaded on the next sync.
+
+    Returns stats dict with number of checked and purged files.
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT f.track_id, f.file_path, t.duration_ms
+        FROM files f
+        JOIN tracks t ON t.id = f.track_id
+        """
+    ).fetchall()
+
+    checked = 0
+    purged = 0
+    for r in rows:
+        checked += 1
+        target = (r["duration_ms"] or 0) / 1000.0 if r["duration_ms"] else None
+        if target is None:
+            continue
+        path = resolve_path(download_root, r["file_path"])
+        actual = _safe_duration_seconds(path)
+        if actual is None:
+            continue
+        max_diff = max(min_abs, target * max_ratio)
+        if abs(actual - target) > max_diff:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            conn.execute("DELETE FROM files WHERE track_id = ?", (r["track_id"],))
+            delete_source_cache(conn, r["track_id"])
+            purged += 1
+    conn.commit()
+    return {"checked": checked, "purged": purged}
