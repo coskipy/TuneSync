@@ -289,7 +289,7 @@ def download_track(
                 "ignoreerrors": False,
                 "overwrites": False,
                 "noprogress": True,
-                "format": "bestaudio[ext=m4a]/bestaudio[acodec^=aac]/bestaudio/best",
+                "format": "bestaudio[ext=m4a]/bestaudio[acodec^=aac]/bestaudio",
                 "outtmpl": str((out_root / base).with_suffix(".%(ext)s")),
                 "postprocessors": [],
                 "progress_hooks": hooks,
@@ -304,7 +304,6 @@ def download_track(
                 candidates = [
                     (out_root / f"{base}.{ext}") if ext else None,
                     (out_root / f"{base}.m4a"),
-                    (out_root / f"{base}.mp4"),
                     (out_root / f"{base}.webm"),
                     (out_root / f"{base}.opus"),
                     (out_root / f"{base}.mp3"),
@@ -342,6 +341,8 @@ def download_track(
 
         # Try cached first; if it fails, drop cache and fall back to search
         if url:
+            if progress:
+                print(f"  URL: {url}")
             try:
                 res = _do_download(url)
                 if res.ok:
@@ -363,6 +364,9 @@ def download_track(
         if not url:
             print(f"  ✗ {label}  (missing URL)")
             return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, error="Selected entry has no URL")
+
+        if progress:
+            print(f"  URL: {url}")
 
         # Persist cache for next time
         try:
