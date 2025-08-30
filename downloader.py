@@ -1,14 +1,13 @@
 # downloader.py
 import os
-import re
-import tempfile
+import sys
 from pathlib import Path
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Dict, Any
 
 from yt_dlp import YoutubeDL
-from yt_dlp.utils import DownloadError, ExtractorError
 
-from db import get_cached_source, upsert_source
+from db import get_conn, get_cached_source, upsert_source, attach_file
+from tagger import tag_tracks_in_db
 
 # Environment
 USE_COOKIES = os.getenv("LS_COOKIES", "0") == "1"
@@ -92,7 +91,8 @@ def _targeted_download(url: str, fmt_id: Optional[str], base: str, out_root: Pat
     outtmpl = str(out_root / f"{base}.%(ext)s")
     opts = {
         "outtmpl": outtmpl,
-        "quiet": False,
+        "quiet": True,
+        "no_warnings": True,
         "noplaylist": True,
         "retries": 3,
         "continuedl": True,
@@ -107,9 +107,12 @@ def _targeted_download(url: str, fmt_id: Optional[str], base: str, out_root: Pat
     with YoutubeDL(opts) as ydl:
         try:
             info = ydl.extract_info(url, download=True)
-            fn = ydl.prepare_filename(info)
-            return True, Path(fn), None
+            fn = Path(ydl.prepare_filename(info))
+            if not fn.exists():
+                return False, None, "download reported success but file missing"
+            return True, fn, None
         except Exception as e:
+            print(f"yt-dlp error: {e}", file=sys.stderr)
             return False, None, str(e)
 
 
@@ -180,64 +183,109 @@ def download_track(track_id: str, artist: str, title: str,
 
     base = f"{artist} - {title}"
 
+    if progress:
+        print("  Searching SoundCloud/YouTube for matches…")
+
     def try_one_url(u: str) -> DownloadResult:
         provider_guess = _infer_provider_from_url(u)
-        tag = "[SC]" if provider_guess == "soundcloud" else "[YT]" if provider_guess == "youtube" else "[SRC]"
         pr = _probe_formats(u, allow_missing_pot=False, progress=progress)
         if not pr.ok:
             pr = _probe_formats(u, allow_missing_pot=True, progress=progress)
             if not pr.ok:
+                if progress:
+                    print(f"  Failed to probe candidate: {pr.error}")
                 return DownloadResult(False, track_id, artist, title, source_url=u, error=pr.error)
 
-        provider = pr.provider or provider_guess
+        provider = pr.provider or provider_guess or "source"
         plan = _choose_plan(pr.info, provider, progress=progress)  # type: ignore[arg-type]
         if not plan:
-            if progress:
-                print(f"  {tag} → No healthy formats; forcing 'bestaudio/best'")
-            ok, final, err = _targeted_download(u, None, base, out_root, None, aac_kbps, True, progress)
-            return DownloadResult(ok, track_id, artist, title, final, u, None, None, False, err)
+            fmt_id, mode, note, keep_native = None, None, "", True
+        else:
+            fmt_id, mode, note, keep_native = plan
 
-        fmt_id, mode, note, keep_native = plan
         if progress:
-            print(f"  {tag} → Using {fmt_id} ({note})")
+            print(f"  Match found on {provider}")
+            if not keep_native:
+                print("  Conversion required")
+            print("  Downloading…")
+
         ok, final, err = _targeted_download(u, fmt_id, base, out_root, mode, aac_kbps, keep_native, progress)
+
+        if progress:
+            if ok:
+                print("  Download complete")
+            else:
+                print(f"  Download failed: {err}")
+
         return DownloadResult(ok, track_id, artist, title, final, u, final.suffix.lstrip(".") if final else None,
                               None, not keep_native, err)
 
-    # Candidate ordering
-    cached = get_cached_source(get_conn(), track_id)
+    # Candidate ordering: cached SoundCloud → SoundCloud search → cached YouTube → YouTube search
+    with get_conn() as conn:
+        cached = get_cached_source(conn, track_id)
     cached_url = cached["url"] if cached else None
     cached_provider = _infer_provider_from_url(cached_url) if cached_url else None
 
     candidates: List[str] = []
 
-    # Cached SC first
     if cached_url and cached_provider == "soundcloud":
         candidates.append(cached_url)
 
-    # Always SC search before YT
     alt_urls = _search_candidates(artist, title, duration_ms, progress=progress)
     sc_alts = [u for u in alt_urls if "soundcloud.com" in u.lower()]
     yt_alts = [u for u in alt_urls if "youtu" in u.lower()]
     candidates.extend(sc_alts)
 
-    # Cached YT deferred
     if cached_url and cached_provider == "youtube":
         candidates.append(cached_url)
 
-    # Then YT search
     candidates.extend(yt_alts)
-
-    if progress:
-        print(f"  ⇒ SC-first mode: trying {len(candidates)} candidate(s)")
 
     for u in candidates:
         res = try_one_url(u)
         if res.ok:
             try:
-                upsert_source(get_conn(), track_id, res.source_url or u)
+                with get_conn() as conn:
+                    upsert_source(conn, track_id, res.source_url or u)
             except Exception:
                 pass
             return res
 
     return DownloadResult(False, track_id, artist, title, error="no usable formats across SC+YT")
+
+
+def download_missing_batch(
+    rows: List[Dict[str, Any]],
+    out_root: Path,
+    *,
+    aac_kbps: int = 192,
+    progress: bool = True,
+) -> List[DownloadResult]:
+    """Download a batch of tracks, tagging and recording successes."""
+    results: List[DownloadResult] = []
+    success_ids: List[str] = []
+    total = len(rows)
+    with get_conn() as conn:
+        for idx, r in enumerate(rows, 1):
+            if progress:
+                print(f"\n[{idx}/{total}] {r['artist']} - {r['name']}")
+            res = download_track(
+                track_id=r["id"],
+                artist=r["artist"],
+                title=r["name"],
+                duration_ms=r.get("duration_ms"),
+                out_root=out_root,
+                aac_kbps=aac_kbps,
+                progress=progress,
+            )
+            results.append(res)
+            if res.ok and res.final_path:
+                try:
+                    rel = res.final_path.relative_to(out_root)
+                except ValueError:
+                    rel = Path(res.final_path.name)
+                attach_file(conn, res.track_id, rel, out_root)
+                success_ids.append(res.track_id)
+    if success_ids:
+        tag_tracks_in_db(out_root, success_ids)
+    return results
