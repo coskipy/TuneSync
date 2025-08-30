@@ -1,19 +1,85 @@
 # db.py
 import os
+import time
 import sqlite3
 from pathlib import Path
+from typing import Any, Iterable
 
 DB_PATH = Path("capsize.sqlite3")
 
+# ---------------------------
+# Connection management
+# ---------------------------
 
 def get_conn():
-    """Return a SQLite connection with foreign keys enabled."""
-    conn = sqlite3.connect(DB_PATH)
+    """
+    Return a SQLite connection configured for fewer 'database is locked' issues.
+    - WAL journal (better concurrency)
+    - busy_timeout so SQLite waits for locks
+    - connect(timeout=...) so initial acquisition waits too
+    - synchronous=NORMAL (safer with WAL; reduces fs churn)
+    """
+    # NOTE: isolation_level left as default (explicit commits still work).
+    # If you want autocommit, pass isolation_level=None and remove explicit commits.
+    conn = sqlite3.connect(DB_PATH, timeout=8.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=8000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
+
+# ---------------------------
+# Internal retry helpers
+# ---------------------------
+
+def _retryable(e: Exception) -> bool:
+    msg = str(e).lower()
+    return isinstance(e, sqlite3.OperationalError) and ("locked" in msg or "busy" in msg)
+
+def _exec_with_retry(conn: sqlite3.Connection, sql: str, params: Iterable[Any] = (), *, tries: int = 5, base_sleep: float = 0.18):
+    """
+    Execute a single statement with small exponential-backoff retries
+    when the DB is briefly locked/busy.
+    """
+    for i in range(tries):
+        try:
+            return conn.execute(sql, params)
+        except Exception as e:
+            if _retryable(e) and i < tries - 1:
+                time.sleep(base_sleep * (2 ** i))  # ~0.18s → ~2.9s
+                continue
+            raise
+
+def _executescript_with_retry(conn: sqlite3.Connection, script: str, *, tries: int = 5, base_sleep: float = 0.18):
+    for i in range(tries):
+        try:
+            return conn.executescript(script)
+        except Exception as e:
+            if _retryable(e) and i < tries - 1:
+                time.sleep(base_sleep * (2 ** i))
+                continue
+            raise
+
+def commit_with_retry(conn: sqlite3.Connection, *, tries: int = 5, base_sleep: float = 0.18):
+    """
+    Optional helper: commit with retries. You don't have to call this if your
+    callers already do conn.commit(); leaving it here for convenience.
+    """
+    for i in range(tries):
+        try:
+            return conn.commit()
+        except Exception as e:
+            if _retryable(e) and i < tries - 1:
+                time.sleep(base_sleep * (2 ** i))
+                continue
+            raise
+
+
+# ---------------------------
+# Schema
+# ---------------------------
 
 def init_db():
     """Create tables if they don't already exist."""
@@ -68,7 +134,10 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_files_path         ON files(file_path);
     """
     with get_conn() as conn:
-        conn.executescript(schema)
+        _executescript_with_retry(conn, schema)
+        # In a 'with' block commit occurs automatically (context manager),
+        # but we'll be explicit in case of older Python versions.
+        commit_with_retry(conn)
 
 
 # ---------------------------
@@ -77,7 +146,7 @@ def init_db():
 
 def upsert_playlist(conn, playlist):
     """Insert or update a playlist row."""
-    conn.execute("""
+    _exec_with_retry(conn, """
         INSERT INTO playlists (id, name, snapshot_id)
         VALUES (?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
@@ -93,7 +162,7 @@ def upsert_playlist(conn, playlist):
 
 def upsert_track(conn, track):
     """Insert or update a track row."""
-    conn.execute("""
+    _exec_with_retry(conn, """
         INSERT INTO tracks (id, name, artist, album, duration_ms)
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
@@ -107,7 +176,7 @@ def upsert_track(conn, track):
 
 def link_playlist_track(conn, playlist_id, track_id, added_at=None):
     """Link a track to a playlist (ignores duplicates)."""
-    conn.execute("""
+    _exec_with_retry(conn, """
         INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, added_at)
         VALUES (?, ?, ?)
     """, (playlist_id, track_id, added_at))
@@ -137,13 +206,12 @@ def attach_file(conn, track_id: str, file_path: Path, download_root: Path | None
         root_env = os.getenv("DOWNLOAD_ROOT")
         download_root = Path(root_env) if root_env else None
 
-    rel = file_path
     if download_root is not None:
         rel = Path(_to_relative(download_root, Path(file_path)))
     else:
         rel = Path(file_path.name) if Path(file_path).is_absolute() else Path(file_path)
 
-    conn.execute("""
+    _exec_with_retry(conn, """
         INSERT INTO files (track_id, file_path)
         VALUES (?, ?)
         ON CONFLICT(track_id) DO UPDATE SET
@@ -188,9 +256,9 @@ def migrate_files_to_relative(conn, download_root: Path) -> int:
         if needs_update:
             rel = _to_relative(download_root, p)
             if rel != stored:
-                conn.execute("UPDATE files SET file_path = ? WHERE track_id = ?", (rel, r["track_id"]))
+                _exec_with_retry(conn, "UPDATE files SET file_path = ? WHERE track_id = ?", (rel, r["track_id"]))
                 updated += 1
-    conn.commit()
+    commit_with_retry(conn)
     return updated
 
 
@@ -207,10 +275,13 @@ def get_file_path_for_track(conn, track_id: str, download_root: Path) -> Path | 
 # ---------------------------
 
 def get_cached_source(conn, track_id: str):
-    return conn.execute("SELECT url, title, uploader, duration_sec FROM sources WHERE track_id = ?", (track_id,)).fetchone()
+    return conn.execute(
+        "SELECT url, title, uploader, duration_sec FROM sources WHERE track_id = ?",
+        (track_id,)
+    ).fetchone()
 
 def upsert_source(conn, track_id: str, url: str, *, title: str | None = None, uploader: str | None = None, duration_sec: int | None = None):
-    conn.execute("""
+    _exec_with_retry(conn, """
         INSERT INTO sources (track_id, url, title, uploader, duration_sec)
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(track_id) DO UPDATE SET
@@ -222,4 +293,4 @@ def upsert_source(conn, track_id: str, url: str, *, title: str | None = None, up
     """, (track_id, url, title, uploader, duration_sec))
 
 def delete_source_cache(conn, track_id: str):
-    conn.execute("DELETE FROM sources WHERE track_id = ?", (track_id,))
+    _exec_with_retry(conn, "DELETE FROM sources WHERE track_id = ?", (track_id,))
