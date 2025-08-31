@@ -192,8 +192,6 @@ def download_track(track_id: str, artist: str, title: str,
         if not pr.ok:
             pr = _probe_formats(u, allow_missing_pot=True, progress=progress)
             if not pr.ok:
-                if progress:
-                    print(f"  Failed to probe candidate: {pr.error}")
                 return DownloadResult(False, track_id, artist, title, source_url=u, error=pr.error)
 
         provider = pr.provider or provider_guess or "source"
@@ -273,7 +271,7 @@ def download_missing_batch(
                 track_id=r["id"],
                 artist=r["artist"],
                 title=r["name"],
-                duration_ms=r.get("duration_ms"),
+                duration_ms=r["duration_ms"] if "duration_ms" in r.keys() else None,
                 out_root=out_root,
                 aac_kbps=aac_kbps,
                 progress=progress,
