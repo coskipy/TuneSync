@@ -26,3 +26,7 @@ CRISB = https://open.spotify.com/playlist/4CQ61TxB4535oqxIhiuZsK?si=3b1661bae505
 RAPID RELIEF = https://open.spotify.com/playlist/4Jm69KFiEHByDFfD3dNy3a?si=598b8b833a0c43d6
 FACE MELTER = https://open.spotify.com/playlist/0X3oznmQjiLmGDzhqS4pu8?si=ebbae024479d4abd
 BASSFIELD = https://open.spotify.com/playlist/0hmv8SjS2b7vLlfXPxmH4n?si=35c0b3b0cb9d49ef
+RNB = https://open.spotify.com/playlist/2EOKOuDd5Yiwq4u2AD3weL?si=775d877c02be475c
+TRANCE = https://open.spotify.com/playlist/1iXoRdVU33nShkesFAGCK2?si=86d6c0e4c73a4adb
+PSYPROG = https://open.spotify.com/playlist/4sJ048ACa82Mw8JYwIf1CY?si=ff551fe448984ef0
+HYPERBITCH = https://open.spotify.com/playlist/12JEufd4QMoRnppXTKXMLt?si=388f8b2715604fac
