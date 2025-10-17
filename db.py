@@ -2,6 +2,7 @@
 import os
 import sqlite3
 from pathlib import Path
+from contextlib import contextmanager
 
 DB_PATH = Path("capsize.sqlite3")
 
@@ -13,6 +14,16 @@ def get_conn():
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
+
+
+@contextmanager
+def get_conn_context():
+    """Context manager for database connections (auto-closes on exit)."""
+    conn = get_conn()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def init_db():
@@ -30,7 +41,9 @@ def init_db():
         name TEXT NOT NULL,
         artist TEXT NOT NULL,
         album TEXT,
-        duration_ms INTEGER
+        duration_ms INTEGER,
+        release_date TEXT,
+        isrc TEXT
     );
 
     CREATE TABLE IF NOT EXISTS playlist_tracks (
@@ -47,17 +60,6 @@ def init_db():
         track_id TEXT PRIMARY KEY,
         file_path TEXT NOT NULL,
         downloaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
-    );
-
-    /* Cache for YouTube/Source lookups so we skip re-searching */
-    CREATE TABLE IF NOT EXISTS sources (
-        track_id TEXT PRIMARY KEY,
-        url TEXT NOT NULL,
-        title TEXT,
-        uploader TEXT,
-        duration_sec INTEGER,
-        checked_at TEXT DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
     );
 
@@ -94,15 +96,17 @@ def upsert_playlist(conn, playlist):
 def upsert_track(conn, track):
     """Insert or update a track row."""
     conn.execute("""
-        INSERT INTO tracks (id, name, artist, album, duration_ms)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO tracks (id, name, artist, album, duration_ms, release_date, isrc)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name=excluded.name,
           artist=excluded.artist,
           album=excluded.album,
-          duration_ms=excluded.duration_ms
+          duration_ms=excluded.duration_ms,
+          release_date=excluded.release_date,
+          isrc=excluded.isrc
     """, (track["id"], track["name"], track["artist"], track.get("album"),
-          track.get("duration_ms")))
+          track.get("duration_ms"), track.get("release_date"), track.get("isrc")))
 
 
 def link_playlist_track(conn, playlist_id, track_id, added_at=None):
@@ -152,15 +156,24 @@ def attach_file(conn, track_id: str, file_path: Path, download_root: Path | None
     """, (track_id, rel.as_posix()))
 
 
-def get_missing_tracks(conn):
-    """Return all DISTINCT tracks that exist in playlists but are missing files."""
+def get_missing_tracks(conn, min_duration_sec: int = 60):
+    """
+    Return all DISTINCT tracks that exist in playlists but are missing files.
+    
+    Args:
+        min_duration_sec: Minimum track duration in seconds (default 60).
+                         Tracks shorter than this will be excluded (e.g., previews).
+                         Set to 0 to include all tracks.
+    """
+    min_duration_ms = min_duration_sec * 1000
     return conn.execute("""
-        SELECT DISTINCT t.id, t.name, t.artist, t.album, t.duration_ms
+        SELECT DISTINCT t.id, t.name, t.artist, t.album, t.duration_ms, t.release_date, t.isrc
         FROM tracks t
         JOIN playlist_tracks pt ON pt.track_id = t.id
         WHERE t.id NOT IN (SELECT track_id FROM files)
+          AND (t.duration_ms IS NULL OR t.duration_ms >= ?)
         ORDER BY t.artist, t.name
-    """).fetchall()
+    """, (min_duration_ms,)).fetchall()
 
 
 def get_orphaned_tracks(conn):
@@ -202,24 +215,3 @@ def get_file_path_for_track(conn, track_id: str, download_root: Path) -> Path | 
     return resolve_path(download_root, row["file_path"])
 
 
-# ---------------------------
-# Source (search) cache
-# ---------------------------
-
-def get_cached_source(conn, track_id: str):
-    return conn.execute("SELECT url, title, uploader, duration_sec FROM sources WHERE track_id = ?", (track_id,)).fetchone()
-
-def upsert_source(conn, track_id: str, url: str, *, title: str | None = None, uploader: str | None = None, duration_sec: int | None = None):
-    conn.execute("""
-        INSERT INTO sources (track_id, url, title, uploader, duration_sec)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(track_id) DO UPDATE SET
-          url=excluded.url,
-          title=excluded.title,
-          uploader=excluded.uploader,
-          duration_sec=excluded.duration_sec,
-          checked_at=CURRENT_TIMESTAMP
-    """, (track_id, url, title, uploader, duration_sec))
-
-def delete_source_cache(conn, track_id: str):
-    conn.execute("DELETE FROM sources WHERE track_id = ?", (track_id,))

@@ -141,7 +141,7 @@ def _delete_stale_playlists(conn, keep_ids: set[str]) -> None:
 # Main sync
 # ---------------------------
 
-def sync() -> Tuple[List[dict], List[dict]]:
+def sync() -> Tuple[List[dict], List[dict], bool]:
     """
     1) Read desired playlists from synced.txt (with aliases supported)
     2) Remove stale playlists from DB
@@ -149,7 +149,7 @@ def sync() -> Tuple[List[dict], List[dict]]:
          - upsert playlist row
          - if snapshot_id changed (or new), fetch tracks, upsert tracks, refresh links
          - if same snapshot_id, skip track fetch to save API calls
-    4) Return (missing_tracks, orphaned_tracks)
+    4) Return (missing_tracks, orphaned_tracks, playlists_changed)
     """
     conn = get_conn()
     desired_ids = set(read_synced())
@@ -161,17 +161,28 @@ def sync() -> Tuple[List[dict], List[dict]]:
         missing = []
         orphaned = get_orphaned_tracks(conn)
         print("✅ Sync complete (no desired playlists listed).")
-        return (missing, orphaned)
+        return (missing, orphaned, False)
 
     # Prune anything not listed
     _delete_stale_playlists(conn, desired_ids)
 
+    print(f"🔄 Syncing {len(desired_ids)} playlists from Spotify...")
+    
+    total = len(desired_ids)
+    
+    # Fetch all playlist metadata in one batch call (much faster!)
+    all_metadata = SpotifyClient.get_playlists_metadata_batch(list(desired_ids))
+    
     # Upsert playlists + (conditionally) their tracks
     updated = 0
     skipped = 0
-    for pid in desired_ids:
-        # Fetch minimal playlist metadata (includes snapshot_id)
-        meta = SpotifyClient.get_playlist_metadata(pid)
+    
+    for idx, pid in enumerate(desired_ids, 1):
+        meta = all_metadata.get(pid)
+        if not meta:
+            print(f"⚠️  Playlist {pid} not found, skipping")
+            continue
+            
         prev_snapshot = _get_db_playlist_snapshot(conn, pid)
         upsert_playlist(conn, meta)
 
@@ -181,6 +192,7 @@ def sync() -> Tuple[List[dict], List[dict]]:
             continue
 
         # Snapshot changed or new playlist: refresh contents
+        playlist_name = meta.get("name", "Unknown")
         tracks = SpotifyClient.get_playlist_tracks(pid)
         for t in tracks:
             upsert_track(conn, t)
@@ -189,14 +201,15 @@ def sync() -> Tuple[List[dict], List[dict]]:
         # (If you prefer to clear+bulk re-link, _refresh_playlist_links(conn, pid, tracks) also does this)
         updated += 1
 
+    print(f"📋 Checked {total} playlists (updated: {updated}, unchanged: {skipped})")
     conn.commit()
 
     missing_rows = get_missing_tracks(conn)   # tracks referenced by any playlist but no file yet
     orphaned_rows = get_orphaned_tracks(conn) # tracks no longer referenced by any playlist
 
-    print(f"✅ Sync complete. Playlists updated: {updated}, skipped: {skipped}. "
-          f"Missing files: {len(missing_rows)}, Orphaned tracks: {len(orphaned_rows)}")
-    return (missing_rows, orphaned_rows)
+    playlists_changed = updated > 0  # True if any playlists were updated
+    
+    return (missing_rows, orphaned_rows, playlists_changed)
 
 
 if __name__ == "__main__":

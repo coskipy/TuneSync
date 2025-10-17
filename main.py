@@ -3,6 +3,8 @@
 #   pip install spotipy python-dotenv yt-dlp mutagen requests
 from pathlib import Path
 import os
+import sys
+import traceback
 from dotenv import load_dotenv
 
 from db import init_db, get_conn, get_missing_tracks, attach_file
@@ -16,6 +18,8 @@ from rekordbox_export import export_rekordbox_xml
 EXPORT_M3U = False
 IGNORE_DIRS = {"old"}  # directories to ignore during rescan
 
+MAX_WORKERS = 8 # Number of parallel download workers
+DEBUG_SEARCH = False  # Set to True to see detailed search results and scoring
 
 def get_download_root() -> Path:
     load_dotenv()
@@ -26,92 +30,177 @@ def get_download_root() -> Path:
 
 
 if __name__ == "__main__":
-    DOWNLOAD_ROOT = get_download_root()
+    try:
+        DOWNLOAD_ROOT = get_download_root()
 
-    # 1) Ensure schema
-    init_db()
+        # 1) Ensure schema
+        try:
+            init_db()
+        except Exception as e:
+            print(f"❌ Database initialization failed: {e}")
+            traceback.print_exc()
+            sys.exit(1)
 
-    # 2) Sync Spotify -> DB (playlists + tracks)
-    missing, orphaned = sync()
+        # 2) Sync Spotify -> DB (playlists + tracks)
+        playlists_changed = False
+        try:
+            missing, orphaned, playlists_changed = sync()
+        except Exception as e:
+            print(f"❌ Spotify sync failed: {e}")
+            traceback.print_exc()
+            print("⚠️  Continuing with existing database...")
+            conn = get_conn()
+            missing = get_missing_tracks(conn)
+            orphaned = []
+            playlists_changed = True  # Assume changes if sync failed, to be safe
 
-    # 3) Rescan disk first to attach anything that already exists
-    stats = rescan_existing_files(DOWNLOAD_ROOT, ignore_dirs=IGNORE_DIRS)
-    print(
-        f"🔎 Rescan: scanned {stats.get('scanned',0)}, attached {stats.get('attached',0)}, "
-        f"ambiguous {stats.get('ambiguous',0)}, unmatched {stats.get('unmatched',0)}, "
-        f"skipped {stats.get('skipped',0)}"
-    )
-
-    purge_stats = purge_bad_duration_files(DOWNLOAD_ROOT)
-    if purge_stats.get("purged"):
-        print(f"♻️  Removed {purge_stats['purged']} mismatched files")
-
-    # 4) Recompute missing after rescan
-    conn = get_conn()
-    still_missing = get_missing_tracks(conn)
-    total = len(still_missing)
-    print(f"\nTo download: {total}")
-    
-    failures = []
-    successes = 0
-    transcoded = 0
-
-    # 5) Download whatever is still missing (with per-track progress)
-    if total:
-        results = download_missing_batch(still_missing, DOWNLOAD_ROOT, aac_kbps=192, progress=True)
-        for r in results:
-            if r.ok:
-                rel = r.final_path.relative_to(DOWNLOAD_ROOT)
-                attach_file(conn, r.track_id, rel, DOWNLOAD_ROOT)  # store RELATIVE path
-                conn.commit()
-                successes += 1
-                if r.transcoded:
-                    transcoded += 1
+        # 3) Rescan disk only if needed
+        needs_download = len(missing)
+        needs_cleanup = 0
+        needs_attachment = 0
+        
+        try:
+            if playlists_changed or missing:
+                # Full rescan - walk entire directory
+                stats = rescan_existing_files(DOWNLOAD_ROOT, ignore_dirs=IGNORE_DIRS)
+                needs_attachment = stats.get('attached', 0)
+                needs_cleanup = stats.get('removed', 0) + stats.get('fragments_deleted', 0)
+                print(
+                    f"� Scanned {stats.get('scanned',0)} files: "
+                    f"attached {stats.get('attached',0)}, skipped {stats.get('skipped',0)}, "
+                    f"removed {stats.get('removed',0)} missing, cleaned {stats.get('fragments_deleted',0)} fragments"
+                )
             else:
-                failures.append(r)
-    else:
-        print("👍 Nothing to download — library is up to date.")
+                # Quick cleanup only
+                from rescan import _cleanup_missing_files, _cleanup_fragment_files
+                conn = get_conn()
+                removed = _cleanup_missing_files(conn, DOWNLOAD_ROOT)
+                fragments = _cleanup_fragment_files(DOWNLOAD_ROOT)
+                needs_cleanup = removed + fragments
+                if removed or fragments:
+                    print(f"🧹 Cleaned up: {removed} missing files, {fragments} fragments")
+        except Exception as e:
+            print(f"❌ Rescan failed: {e}")
+            traceback.print_exc()
 
-    # 6) Tag all files on disk with Spotify metadata + cover
-    tag_stats = tag_tracks_in_db(DOWNLOAD_ROOT)
-    print(
-        f"\n🖊️  Tagging: {tag_stats['tagged']} tagged, "
-        f"{tag_stats['skipped']} skipped, {tag_stats['errors']} errors"
-    )
+        # 4) Recompute missing after rescan
+        try:
+            conn = get_conn()
+            still_missing = get_missing_tracks(conn)
+            total = len(still_missing)
+            
+            # Print status summary
+            status_parts = []
+            if total > 0:
+                status_parts.append(f"{total} to download")
+            if needs_attachment > 0:
+                status_parts.append(f"{needs_attachment} attached")
+            if needs_cleanup > 0:
+                status_parts.append(f"{needs_cleanup} cleaned")
+            
+            if status_parts:
+                print(f"📊 Status: {', '.join(status_parts)}")
+            else:
+                print(f"✨ Library is up to date")
+                
+        except Exception as e:
+            print(f"❌ Failed to get missing tracks: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+        
+        failures = []
+        successes = 0
+        transcoded = 0
+        newly_downloaded_track_ids = []  # Track which files were just downloaded
 
-    # 7) Export Rekordbox XML (auto-sync on RB startup)
-    xml_custom = os.getenv("REKORDBOX_XML_PATH")
-    alias_map = get_synced_alias_map()
-    xml_path = export_rekordbox_xml(DOWNLOAD_ROOT, out_xml=Path(xml_custom) if xml_custom else None, alias_map=alias_map)
-    print(f"🧭 Rekordbox XML written to: {xml_path.as_posix()}")
+        # 5) Download whatever is still missing
+        if total:
+            print(f"\n⬇️  Downloading {total} tracks...")
+            try:
+                results = download_missing_batch(still_missing, DOWNLOAD_ROOT, aac_kbps=192, progress=True, max_workers=MAX_WORKERS, debug=DEBUG_SEARCH)
+                batch_size = 25  # Commit every 25 files for better performance
+                for idx, r in enumerate(results):
+                    if r and r.ok:
+                        try:
+                            rel = r.final_path.relative_to(DOWNLOAD_ROOT)
+                            attach_file(conn, r.track_id, rel, DOWNLOAD_ROOT)
+                            newly_downloaded_track_ids.append(r.track_id)  # Track new downloads
+                            successes += 1
+                            if r.transcoded:
+                                transcoded += 1
+                        except Exception as e:
+                            print(f"⚠️  Failed to record {r.title}: {e}")
+                            failures.append(r)
+                    elif r:
+                        failures.append(r)
+                    
+                    # Batch commit every N files
+                    if (idx + 1) % batch_size == 0 or idx == len(results) - 1:
+                        conn.commit()
+                
+                print(f"✅ Downloaded {successes}/{total} tracks" + (f" (transcoded: {transcoded})" if transcoded else ""))
+            except Exception as e:
+                print(f"❌ Download batch failed: {e}")
+                traceback.print_exc()
+                print("⚠️  Continuing to tagging phase...")
 
-    # (Optional) .m3u8 export alongside XML
-    if EXPORT_M3U:
-        from playlist_export import export_all_m3u  # lazy import to avoid unused dep when off
-        n = export_all_m3u(DOWNLOAD_ROOT, alias_map=alias_map, purge_existing=True)  # writes to DOWNLOAD_ROOT/Playlists
-        print(f"📄 Also exported {n} M3U playlists.")
+        # 6) Tag only newly downloaded files with Spotify metadata + cover
+        try:
+            if newly_downloaded_track_ids:
+                print(f"\n🏷️  Tagging {len(newly_downloaded_track_ids)} files...")
+                tag_stats = tag_tracks_in_db(DOWNLOAD_ROOT, track_ids=newly_downloaded_track_ids)
+                print(f"✅ Tagged {tag_stats['tagged']} files" + (f" ({tag_stats['errors']} errors)" if tag_stats['errors'] else ""))
+            else:
+                tag_stats = {"tagged": 0, "skipped": 0, "errors": 0}
+        except Exception as e:
+            print(f"❌ Tagging failed: {e}")
+            traceback.print_exc()
 
-    # 8) Final summary
-    not_found = [f for f in failures if (f.error or "").lower().startswith("no suitable youtube match")]
-    other_errs = [f for f in failures if f not in not_found]
+        # 7) Export Rekordbox XML
+        try:
+            xml_custom = os.getenv("REKORDBOX_XML_PATH")
+            alias_map = get_synced_alias_map()
+            xml_path = export_rekordbox_xml(DOWNLOAD_ROOT, out_xml=Path(xml_custom) if xml_custom else None, alias_map=alias_map)
+            print(f"\n📀 Exported Rekordbox library → {xml_path.name}")
+        except Exception as e:
+            print(f"❌ Rekordbox export failed: {e}")
+            traceback.print_exc()
 
-    print("\n================ SUMMARY ================")
-    print(f"✅ Downloaded: {successes}  (transcoded: {transcoded})")
-    print(f"❌ Failed:     {len(failures)}  |  Not found: {len(not_found)}  Other errors: {len(other_errs)}")
+        # 8) Final summary (only if there were downloads or failures)
+        if total > 0 or failures:
+            not_found = [f for f in failures if (f.error or "").lower().startswith("no suitable youtube match")]
+            other_errs = [f for f in failures if f not in not_found]
 
-    if not_found:
-        print("\nTracks not found:")
-        for f in not_found[:15]:
-            print(f"  - {f.artist} - {f.title} ({f.track_id})  {f.error}")
-        if len(not_found) > 15:
-            print(f"  … and {len(not_found)-15} more")
+            print("\n" + "="*50)
+            print("📊 SUMMARY")
+            print("="*50)
+            if successes > 0:
+                print(f"  ✅ Downloaded: {successes}" + (f" (transcoded: {transcoded})" if transcoded else ""))
+            if failures:
+                print(f"  ❌ Failed: {len(failures)}" + (f" (not found: {len(not_found)}, errors: {len(other_errs)})" if not_found or other_errs else ""))
 
-    if other_errs:
-        print("\nOther errors:")
-        for f in other_errs[:10]:
-            print(f"  - {f.artist} - {f.title} ({f.track_id})  {f.error}")
-        if len(other_errs) > 10:
-            print(f"  … and {len(other_errs)-10} more")
+            if not_found:
+                print(f"\n  Tracks not found on YouTube:")
+                for f in not_found[:5]:
+                    print(f"    • {f.artist} - {f.title}")
+                if len(not_found) > 5:
+                    print(f"    ... and {len(not_found)-5} more")
 
-    print("=========================================\n")
-    print("✅ Done.")
+            if other_errs:
+                print(f"\n  Download errors:")
+                for f in other_errs[:5]:
+                    print(f"    • {f.artist} - {f.title}: {f.error}")
+                if len(other_errs) > 5:
+                    print(f"    ... and {len(other_errs)-5} more")
+
+            print("="*50)
+
+        print("\n✅ Done!")
+
+    except KeyboardInterrupt:
+        print("\n\n⏸️  Interrupted by user.")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n❌ Unexpected error: {e}")
+        traceback.print_exc()
+        sys.exit(1)

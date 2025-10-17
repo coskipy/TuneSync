@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 from time import sleep
+import threading
 
 from dotenv import load_dotenv
 import spotipy
@@ -18,31 +19,38 @@ class _Cache:
 class SpotifyClient:
     sp: Optional[spotipy.Spotify] = None  # class-wide client
     cache = _Cache(artist_genres={})
+    _request_lock = threading.Lock()  # Rate limit protection
+    _min_request_delay = 0.1  # Minimum seconds between requests (10 req/sec)
 
     @classmethod
-    def login(cls, scope: str = "playlist-read-private") -> spotipy.Spotify:
+    def login(cls, scope: str = "playlist-read-private", silent: bool = False) -> spotipy.Spotify:
         if cls.sp is None:
             load_dotenv()
             cls.sp = spotipy.Spotify(auth_manager=SpotifyOAuth(scope=scope))
-            me = cls.sp.current_user()
-            print("✅ Logged in as:", me.get("display_name") or me.get("id"))
+            if not silent:
+                me = cls.sp.current_user()
+                print("✅ Logged in as:", me.get("display_name") or me.get("id"), flush=True)
         return cls.sp
 
     # ------------------------
     # Internal helpers
     # ------------------------
-    @staticmethod
-    def _retry(fn, *args, **kwargs):
-        """Tiny retry helper for occasional rate limits and transient 5xx."""
+    @classmethod
+    def _retry(cls, fn, *args, **kwargs):
+        """Retry helper with rate limiting and backoff for rate limits/transient errors."""
         tries = 3
         delay = 1.5
         for i in range(tries):
             try:
-                return fn(*args, **kwargs)
+                # Rate limit protection: serialize requests
+                with cls._request_lock:
+                    sleep(cls._min_request_delay)
+                    return fn(*args, **kwargs)
             except SpotifyException as e:
                 if (e.http_status in (429, 500, 502, 503, 504)) and i < tries - 1:
-                    sleep(delay)
-                    delay *= 2
+                    backoff = delay * (2 ** i)
+                    print(f"  ⏱️  Rate limited (HTTP {e.http_status}), waiting {backoff}s...")
+                    sleep(backoff)
                     continue
                 raise
 
@@ -51,7 +59,7 @@ class SpotifyClient:
     # ------------------------
     @classmethod
     def get_my_playlists(cls) -> List[Dict]:
-        sp = cls.login()
+        sp = cls.login(silent=True)  # Don't print login message here
         results = cls._retry(sp.current_user_playlists, limit=50)
         playlists: List[Dict] = []
         while results:
@@ -71,6 +79,32 @@ class SpotifyClient:
         return {"id": p["id"], "name": p["name"], "snapshot_id": p.get("snapshot_id")}
 
     @classmethod
+    def get_playlists_metadata_batch(cls, playlist_ids: List[str]) -> Dict[str, Dict]:
+        """
+        Get metadata for multiple playlists efficiently.
+        Returns {playlist_id: {id, name, snapshot_id}}
+        
+        Strategy: First try to get them all from get_my_playlists() (1 API call),
+        then individually fetch any that weren't in that list (e.g., followed playlists).
+        """
+        if not playlist_ids:
+            return {}
+        
+        # First, get all user playlists in one go (handles most cases)
+        my_playlists = cls.get_my_playlists()
+        result = {p["id"]: p for p in my_playlists if p["id"] in playlist_ids}
+        
+        # Fetch any missing ones individually (e.g., followed playlists not owned by user)
+        missing_ids = set(playlist_ids) - result.keys()
+        for pid in missing_ids:
+            try:
+                result[pid] = cls.get_playlist_metadata(pid)
+            except Exception as e:
+                print(f"  ⚠️  Failed to fetch playlist {pid}: {e}")
+        
+        return result
+
+    @classmethod
     def get_playlist_tracks(cls, playlist_id: str) -> List[Dict]:
         """
         Return minimal rows for DB (plus added_at for playlist order):
@@ -79,7 +113,7 @@ class SpotifyClient:
         """
         sp = cls.login()
         fields = (
-            "items(added_at,track(id,type,name,artists(name),album(name),duration_ms)),"
+            "items(added_at,track(id,type,name,artists(name),album(name,release_date),duration_ms,external_ids)),"
             "next"
         )
         results = cls._retry(sp.playlist_tracks, playlist_id, fields=fields, limit=100)
@@ -98,6 +132,8 @@ class SpotifyClient:
                     "artist": ", ".join(a["name"] for a in tr["artists"]),
                     "album": tr["album"]["name"],
                     "duration_ms": tr.get("duration_ms"),
+                    "release_date": tr["album"].get("release_date"),
+                    "isrc": tr.get("external_ids", {}).get("isrc"),
                     "added_at": item.get("added_at"),
                 })
             results = cls._retry(sp.next, results) if results.get("next") else None

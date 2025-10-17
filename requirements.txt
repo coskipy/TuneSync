@@ -1,0 +1,5 @@
+spotipy>=2.23.0
+python-dotenv>=1.0.0
+yt-dlp>=2023.10.0
+mutagen>=1.47.0
+requests>=2.31.0

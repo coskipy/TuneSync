@@ -1,4 +1,40 @@
+# Environment and secrets
 .env
-synced.txt
+
+# Database
 capsize.sqlite3
+
+# Cache and sync files
+.cache/
+synced.txt
 synced_backup.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backups
+*.backup
+*.bak
