@@ -34,3 +34,4 @@ CHILL GARAGE = https://open.spotify.com/playlist/4AKX2EoDDth1fCQ0w8Y9WH?si=039e0
 CHILL PROG = https://open.spotify.com/playlist/6qGJKkgdNo3FlgYMHrsaKl?si=653f3070716847fc
 OPEN CLOSE = https://open.spotify.com/playlist/5TzUKI0Be4OmQWLFgUJ9mw?si=4ecd793e73ae4657
 BIGROOM = https://open.spotify.com/playlist/7wle3ChEyJrAwyE89BzDuk?si=9a82e768b2fd4a3b
+TULUM TUNES = https://open.spotify.com/playlist/31hzjpPr4dHExkcvqmYlPK?si=893264b945af4031

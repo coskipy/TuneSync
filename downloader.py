@@ -6,12 +6,16 @@ import re
 import subprocess
 import shutil
 import time
+import threading
 from typing import Optional, Dict, Any, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from yt_dlp import YoutubeDL
 
 from db import get_conn
+
+# Thread-safe print lock for parallel downloads
+_print_lock = threading.Lock()
 
 
 # ---------------------------
@@ -22,19 +26,28 @@ REKORDBOX_AUDIO_EXTS = {"mp3", "m4a", "aac", "wav", "aiff", "flac", "alac"}
 ALWAYS_TRANSCODE_TO = "m4a"  # Set to None to keep downloads as-is, or "m4a" to always convert to m4a
 
 def _sanitize(name: str) -> str:
-    """Sanitize filename to match yt-dlp's behavior exactly.
+    """Sanitize filename while preserving artist names like 'fred again..'
     
-    yt-dlp keeps most characters including periods, only replacing filesystem-unsafe chars.
-    We match this behavior to ensure we can find downloaded files.
+    Only removes truly filesystem-unsafe characters, keeps everything else including:
+    - Multiple periods (for artists like "fred again..")
+    - Commas, parentheses, brackets
+    - Spaces and normal punctuation
     """
-    # Only replace characters that are filesystem-unsafe (matching yt-dlp's behavior)
-    # yt-dlp keeps periods, commas, spaces, parentheses, etc.
+    # Replace filesystem-unsafe characters with underscore
+    # Windows: \ / : * ? " < > |
+    # These are the ONLY characters we need to replace
     name = re.sub(r'[\\/:*?"<>|]+', "_", name)
-    # Normalize whitespace
+    
+    # Normalize multiple spaces to single space
     name = re.sub(r"\s+", " ", name).strip()
-    # Strip leading/trailing periods and spaces for safety
-    name = name.strip(". ")
-    return name
+    
+    # Windows doesn't allow filenames ending with period
+    # But "fred again.." in middle is fine, e.g. "fred again.. - Billie" is OK
+    # Only strip trailing periods if they're at the very end
+    while name.endswith("."):
+        name = name[:-1]
+    
+    return name.strip()
 
 def _norm(s: str) -> str:
     s = s.lower()
@@ -400,6 +413,11 @@ def _search_best(artist: str, title: str, duration_ms: Optional[int], release_da
         "default_search": "auto",
         "skip_download": True,
         "extract_flat": True,
+        # Workaround for YouTube 403 errors (see: https://github.com/yt-dlp/yt-dlp/issues/14680)
+        # Use actual player version to avoid pinned player issues
+        "extractor_args": {"youtube": {"player_js_version": ["actual"]}},
+        # Suppress expected warnings about SABR/missing formats
+        "no_warnings": True,
     }
 
     # ========== TIER 1: ISRC Search on YouTube ========== 
@@ -568,9 +586,15 @@ def _ffmpeg_transcode_to_m4a(src: Path, dst: Path, aac_kbps: int = 192) -> None:
     cmd = [
         "ffmpeg", "-y", "-nostdin",
         "-i", str(src),
-        "-vn",
-        "-c:a", "aac",
-        "-b:a", f"{aac_kbps}k",
+        "-vn",  # No video
+        "-c:a", "aac",  # AAC audio codec
+        "-b:a", f"{aac_kbps}k",  # Bitrate
+        "-ar", "44100",  # Sample rate (standard for music)
+        "-af", "aresample=resampler=soxr",  # High-quality resampling
+        "-avoid_negative_ts", "make_zero",  # Fix timestamp issues at start
+        "-fflags", "+bitexact+genpts",  # Consistent output + regenerate timestamps
+        "-movflags", "+faststart",  # Optimize for streaming
+        "-write_xing", "0",  # Don't write Xing header (can cause start issues)
         str(dst),
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -630,6 +654,8 @@ def download_track(
     try:
         out_root.mkdir(parents=True, exist_ok=True)
         base = _sanitize(label)
+        
+        # Check for existing files with same base name but different track_id
         base = _get_unique_filename(out_root, base, track_id)  # Handle collisions
         conn = get_conn()
 
@@ -653,21 +679,32 @@ def download_track(
         def _do_download(u: str) -> DownloadResult:
             ydl_opts = {
                 "quiet": True,
+                "no_warnings": True,
+                "ignoreerrors": True,  # Suppress transient errors during retries
                 "noplaylist": True,
                 "continuedl": True,
-                "concurrent_fragment_downloads": 3,
-                "retries": 3,
-                "fragment_retries": 5,
-                "ignoreerrors": False,
+                # Reduce concurrent downloads to avoid m3u8 fragment race conditions
+                "concurrent_fragment_downloads": 1,
+                "retries": 5,
+                "fragment_retries": 10,
                 "overwrites": False,
                 "noprogress": True,
-                # Prefer M4A/MP3 first, then AAC codec, then fall back to anything (opus/webm)
-                # We'll transcode opus/webm to M4A after download
-                "format": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio[acodec^=aac]/bestaudio[acodec=mp3]/bestaudio",
-                "outtmpl": str((out_root / base).with_suffix(".%(ext)s")),
+                # Workaround for YouTube SABR/PO token/signature issues
+                # Use HLS (m3u8) formats which don't require PO tokens or signature decryption
+                # Priority: lowest resolution m3u8 first (saves bandwidth, Topic videos are static images)
+                # Format 91 = 144p (~1.36MB), 92 = 240p (~1.45MB), good for Topic channels
+                # We extract audio and transcode to m4a afterwards anyway
+                "format": "91/92/93/94/95/96/bestaudio",
+                "outtmpl": str(out_root / f"{base}.%(ext)s"),
                 "postprocessors": [],
                 "progress_hooks": hooks,
                 "cookiesfrombrowser": ["chrome"],  # Extract cookies from Chrome for SoundCloud auth
+                # Workaround for YouTube 403 errors (see: https://github.com/yt-dlp/yt-dlp/issues/14680)
+                # Use actual player version to avoid pinned player issues
+                "extractor_args": {"youtube": {"player_js_version": ["actual"]}},
+                # Sleep between retries to avoid rate limiting
+                "sleep_interval": 1,
+                "max_sleep_interval": 3,
             }
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(u, download=True)
@@ -744,8 +781,15 @@ def download_track(
                     if ALWAYS_TRANSCODE_TO and ext not in (ALWAYS_TRANSCODE_TO, "mp3"):
                         if progress:
                             print(f"\r  ", end="", flush=True)  # Clear search status
-                        m4a_path = (out_root / base).with_suffix(f".{ALWAYS_TRANSCODE_TO}")
+                        m4a_path = out_root / f"{base}.{ALWAYS_TRANSCODE_TO}"
                         _ffmpeg_transcode_to_m4a(final, m4a_path, aac_kbps=aac_kbps)
+                        
+                        # Delete the original file after successful transcode
+                        try:
+                            final.unlink()
+                        except OSError:
+                            pass  # Ignore deletion errors
+                        
                         if progress:
                             print(f"\r  {label}: Complete ✓ (transcoded)                    ")
                         return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title,
@@ -759,11 +803,18 @@ def download_track(
                                               final_path=final,
                                               source_url=u, ext=ext, abr_kbps=abr, transcoded=False)
 
-                # If file is not compatible (opus, webm, etc.), must transcode
+                # If file is not compatible (opus, webm, mp4, etc.), must transcode
                 if progress:
                     print(f"\r  ", end="", flush=True)  # Clear search status
-                m4a_path = (out_root / base).with_suffix(".m4a")
+                m4a_path = out_root / f"{base}.m4a"
                 _ffmpeg_transcode_to_m4a(final, m4a_path, aac_kbps=aac_kbps)
+                
+                # Delete the original file after successful transcode
+                try:
+                    final.unlink()
+                except OSError:
+                    pass  # Ignore deletion errors
+                
                 if progress:
                     print(f"\r  {label}: Complete ✓ (transcoded)                    ")
                 return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title,
@@ -814,9 +865,13 @@ def download_missing_batch(
         debug: Show detailed search results and scoring
     """
     total = len(rows)
+    completed = 0
     
     def _download_wrapper(idx: int, r: Dict[str, Any]) -> tuple[int, DownloadResult]:
         """Wrapper to track which track is being downloaded."""
+        nonlocal completed
+        
+        # Disable individual track progress in parallel mode
         res = download_track(
             track_id=r["id"],
             artist=r["artist"],
@@ -826,9 +881,19 @@ def download_missing_batch(
             isrc=r["isrc"] if "isrc" in r.keys() else None,
             out_root=out_root,
             aac_kbps=aac_kbps,
-            progress=progress,
+            progress=False,  # Disable per-track progress to avoid overlap
             debug=debug
         )
+        
+        # Thread-safe status update
+        with _print_lock:
+            completed += 1
+            status = "✓" if res.ok else "✗"
+            label = f"{r['artist']} - {r['name']}"
+            if len(label) > 60:
+                label = label[:57] + "..."
+            print(f"  [{completed:>{len(str(total))}}/{total}] {status} {label}")
+        
         return (idx, res)
     
     results: List[DownloadResult] = [None] * total

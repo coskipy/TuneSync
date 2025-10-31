@@ -1,5 +1,6 @@
 spotipy>=2.23.0
 python-dotenv>=1.0.0
-yt-dlp>=2023.10.0
+# Using latest GitHub master for newest YouTube fixes
+git+https://github.com/yt-dlp/yt-dlp.git
 mutagen>=1.47.0
 requests>=2.31.0
