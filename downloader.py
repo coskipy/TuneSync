@@ -689,19 +689,16 @@ def download_track(
                 "fragment_retries": 10,
                 "overwrites": False,
                 "noprogress": True,
-                # Workaround for YouTube SABR/PO token/signature issues
-                # Use HLS (m3u8) formats which don't require PO tokens or signature decryption
-                # Priority: lowest resolution m3u8 first (saves bandwidth, Topic videos are static images)
-                # Format 91 = 144p (~1.36MB), 92 = 240p (~1.45MB), good for Topic channels
-                # We extract audio and transcode to m4a afterwards anyway
-                "format": "91/92/93/94/95/96/bestaudio",
+                # Format priority: 140 (m4a 128kbps AAC, highest quality audio-only) first
+                # Then 251 (webm/opus 160kbps), bestaudio, 139 (m4a 48kbps low quality)
+                # yt-dlp 2025.11.12+ uses Deno/JS runtime to solve YouTube challenges
+                # m3u8 formats (91-96) kept as last resort backup in case YouTube implements new restrictions
+                # Format 91 = 144p (~1.36MB), 92 = 240p (~1.45MB), good for Topic channels with static images
+                "format": "140/251/bestaudio/139/91/92/93/94/95/96",
                 "outtmpl": str(out_root / f"{base}.%(ext)s"),
                 "postprocessors": [],
                 "progress_hooks": hooks,
                 "cookiesfrombrowser": ["chrome"],  # Extract cookies from Chrome for SoundCloud auth
-                # Workaround for YouTube 403 errors (see: https://github.com/yt-dlp/yt-dlp/issues/14680)
-                # Use actual player version to avoid pinned player issues
-                "extractor_args": {"youtube": {"player_js_version": ["actual"]}},
                 # Sleep between retries to avoid rate limiting
                 "sleep_interval": 1,
                 "max_sleep_interval": 3,
