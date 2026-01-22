@@ -32,7 +32,10 @@ def init_db():
     CREATE TABLE IF NOT EXISTS playlists (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
+        creator TEXT,
         snapshot_id TEXT,
+        image_url TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -41,6 +44,7 @@ def init_db():
         name TEXT NOT NULL,
         artist TEXT NOT NULL,
         album TEXT,
+        cover_url TEXT,
         duration_ms INTEGER,
         release_date TEXT,
         isrc TEXT
@@ -72,6 +76,27 @@ def init_db():
     with get_conn() as conn:
         conn.executescript(schema)
 
+        # Lightweight migration for older DBs.
+        _ensure_column(conn, "playlists", "image_url", "TEXT")
+        _ensure_column(conn, "playlists", "creator", "TEXT")
+        _ensure_column(conn, "playlists", "created_at", "TEXT")
+        _ensure_column(conn, "tracks", "cover_url", "TEXT")
+
+        # Backfill created_at for existing rows (best-effort).
+        try:
+            conn.execute(
+                "UPDATE playlists SET created_at = COALESCE(created_at, updated_at, CURRENT_TIMESTAMP)"
+            )
+        except Exception:
+            pass
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_def: str) -> None:
+    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column in cols:
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_def}")
+
 
 # ---------------------------
 # Playlist operations
@@ -80,13 +105,15 @@ def init_db():
 def upsert_playlist(conn, playlist):
     """Insert or update a playlist row."""
     conn.execute("""
-        INSERT INTO playlists (id, name, snapshot_id)
-        VALUES (?, ?, ?)
+                                INSERT INTO playlists (id, name, creator, snapshot_id, image_url)
+                                VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name=excluded.name,
+                    creator=excluded.creator,
           snapshot_id=excluded.snapshot_id,
+                    image_url=excluded.image_url,
           updated_at=CURRENT_TIMESTAMP
-    """, (playlist["id"], playlist["name"], playlist.get("snapshot_id")))
+                """, (playlist["id"], playlist["name"], playlist.get("creator"), playlist.get("snapshot_id"), playlist.get("image_url")))
 
 
 # ---------------------------
@@ -96,17 +123,18 @@ def upsert_playlist(conn, playlist):
 def upsert_track(conn, track):
     """Insert or update a track row."""
     conn.execute("""
-        INSERT INTO tracks (id, name, artist, album, duration_ms, release_date, isrc)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO tracks (id, name, artist, album, cover_url, duration_ms, release_date, isrc)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name=excluded.name,
           artist=excluded.artist,
           album=excluded.album,
-          duration_ms=excluded.duration_ms,
-          release_date=excluded.release_date,
-          isrc=excluded.isrc
+        cover_url=COALESCE(excluded.cover_url, tracks.cover_url),
+        duration_ms=excluded.duration_ms,
+        release_date=excluded.release_date,
+        isrc=excluded.isrc
     """, (track["id"], track["name"], track["artist"], track.get("album"),
-          track.get("duration_ms"), track.get("release_date"), track.get("isrc")))
+        track.get("cover_url"), track.get("duration_ms"), track.get("release_date"), track.get("isrc")))
 
 
 def link_playlist_track(conn, playlist_id, track_id, added_at=None):

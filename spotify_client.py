@@ -64,10 +64,18 @@ class SpotifyClient:
         playlists: List[Dict] = []
         while results:
             for p in results["items"]:
+                owner = p.get("owner") or {}
+                creator = owner.get("display_name") or owner.get("id")
+                images = p.get("images") or []
+                cover_url = None
+                if images:
+                    cover_url = sorted(images, key=lambda x: (x.get("width") or 0), reverse=True)[0].get("url")
                 playlists.append({
                     "id": p["id"],
                     "name": p["name"],
+                    "creator": creator,
                     "snapshot_id": p.get("snapshot_id"),
+                    "image_url": cover_url,
                 })
             results = cls._retry(sp.next, results) if results.get("next") else None
         return playlists
@@ -75,8 +83,14 @@ class SpotifyClient:
     @classmethod
     def get_playlist_metadata(cls, playlist_id: str) -> Dict:
         sp = cls.login()
-        p = cls._retry(sp.playlist, playlist_id, fields="id,name,snapshot_id")
-        return {"id": p["id"], "name": p["name"], "snapshot_id": p.get("snapshot_id")}
+        p = cls._retry(sp.playlist, playlist_id, fields="id,name,snapshot_id,images,owner(display_name,id)")
+        owner = p.get("owner") or {}
+        creator = owner.get("display_name") or owner.get("id")
+        images = p.get("images") or []
+        cover_url = None
+        if images:
+            cover_url = sorted(images, key=lambda x: (x.get("width") or 0), reverse=True)[0].get("url")
+        return {"id": p["id"], "name": p["name"], "creator": creator, "snapshot_id": p.get("snapshot_id"), "image_url": cover_url}
 
     @classmethod
     def get_playlists_metadata_batch(cls, playlist_ids: List[str]) -> Dict[str, Dict]:
@@ -113,7 +127,7 @@ class SpotifyClient:
         """
         sp = cls.login()
         fields = (
-            "items(added_at,track(id,type,name,artists(name),album(name,release_date),duration_ms,external_ids)),"
+            "items(added_at,track(id,type,name,artists(name),album(name,release_date,images),duration_ms,external_ids)),"
             "next"
         )
         results = cls._retry(sp.playlist_tracks, playlist_id, fields=fields, limit=100)
@@ -131,6 +145,8 @@ class SpotifyClient:
                     "name": tr["name"],
                     "artist": ", ".join(a["name"] for a in tr["artists"]),
                     "album": tr["album"]["name"],
+                    "cover_url": (sorted((tr["album"].get("images") or []), key=lambda x: (x.get("width") or 0), reverse=True)[0].get("url")
+                                   if (tr["album"].get("images") or []) else None),
                     "duration_ms": tr.get("duration_ms"),
                     "release_date": tr["album"].get("release_date"),
                     "isrc": tr.get("external_ids", {}).get("isrc"),
