@@ -3,8 +3,22 @@ import os
 import sqlite3
 from pathlib import Path
 from contextlib import contextmanager
+import re
 
-DB_PATH = Path("capsize.sqlite3")
+
+_BASE_DIR = Path(__file__).resolve().parent
+
+
+def _path_from_env(var: str, default: Path) -> Path:
+    v = (os.getenv(var) or "").strip()
+    if not v:
+        return default
+    return Path(v).expanduser().resolve()
+
+
+# Default to a stable location (repo root) instead of the current working directory.
+DB_PATH = _path_from_env("LIGHTSYNC_DB_PATH", _BASE_DIR / "capsize.sqlite3")
+LEGACY_SYNCED_TXT_PATH = _path_from_env("LIGHTSYNC_SYNCED_TXT_PATH", _BASE_DIR / "synced.txt")
 
 
 def get_conn():
@@ -29,6 +43,12 @@ def get_conn_context():
 def init_db():
     """Create tables if they don't already exist."""
     schema = """
+    CREATE TABLE IF NOT EXISTS app_state (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS playlists (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -80,7 +100,66 @@ def init_db():
         _ensure_column(conn, "playlists", "image_url", "TEXT")
         _ensure_column(conn, "playlists", "creator", "TEXT")
         _ensure_column(conn, "playlists", "created_at", "TEXT")
+        sync_enabled_added = _ensure_column(conn, "playlists", "sync_enabled", "INTEGER DEFAULT 1")
         _ensure_column(conn, "tracks", "cover_url", "TEXT")
+
+        # One-time, best-effort migration: if we just added sync_enabled and a legacy
+        # synced.txt exists, mirror its selections into the DB. Normal operation does
+        # not depend on synced.txt.
+        # This makes the DB the source of truth while keeping existing users' selections.
+        if sync_enabled_added:
+            try:
+                synced_path = LEGACY_SYNCED_TXT_PATH
+                if synced_path.exists():
+                    ids: list[str] = []
+
+                    def extract_id(token: str) -> str:
+                        token = (token or "").strip()
+                        if not token:
+                            return ""
+                        if "open.spotify.com/playlist/" in token:
+                            return token.split("/playlist/", 1)[1].split("?", 1)[0].split("/", 1)[0]
+                        if token.startswith("spotify:playlist:"):
+                            return token.split(":")[-1]
+                        return token
+
+                    for line in synced_path.read_text().splitlines():
+                        raw = (line or "").strip()
+                        if not raw or raw.startswith("#"):
+                            continue
+                        if "#" in raw:
+                            raw = raw.split("#", 1)[0].strip()
+                        if ("=" in raw) or ("|" in raw):
+                            right = raw.split("=", 1)[1] if "=" in raw else raw.split("|", 1)[1]
+                            token = right.strip()
+                        else:
+                            token = raw
+                        pid = extract_id(token)
+                        if pid:
+                            ids.append(pid)
+
+                    # de-dupe while preserving order
+                    seen: set[str] = set()
+                    uniq: list[str] = []
+                    for pid in ids:
+                        if pid in seen:
+                            continue
+                        uniq.append(pid)
+                        seen.add(pid)
+
+                    if uniq:
+                        # synced.txt was previously source of truth; mirror it.
+                        conn.execute("UPDATE playlists SET sync_enabled = 0")
+                        for pid in uniq:
+                            conn.execute(
+                                "INSERT OR IGNORE INTO playlists (id, name, sync_enabled) VALUES (?, ?, 1)",
+                                (pid, pid),
+                            )
+                            conn.execute("UPDATE playlists SET sync_enabled = 1 WHERE id = ?", (pid,))
+            except Exception:
+                pass
+
+        _import_legacy_synced_txt_if_needed(conn)
 
         # Backfill created_at for existing rows (best-effort).
         try:
@@ -91,11 +170,97 @@ def init_db():
             pass
 
 
-def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_def: str) -> None:
+def _app_state_get(conn: sqlite3.Connection, key: str) -> str | None:
+    try:
+        row = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
+def _app_state_set(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
+        (key, value),
+    )
+
+
+def _import_legacy_synced_txt_if_needed(conn: sqlite3.Connection) -> None:
+    """One-time import from synced.txt if DB has no playlists.
+
+    This is intentionally conservative: it only runs when the playlists table is empty.
+    """
+    try:
+        if _app_state_get(conn, "migrated_synced_txt") == "1":
+            return
+
+        playlists_count = conn.execute("SELECT COUNT(*) FROM playlists").fetchone()[0]
+        if int(playlists_count or 0) != 0:
+            return
+
+        synced_path = LEGACY_SYNCED_TXT_PATH
+        if not synced_path.exists():
+            return
+
+        id_re = re.compile(r"^[A-Za-z0-9]{22}$")
+
+        def extract_id(token: str) -> str:
+            token = (token or "").strip()
+            if not token:
+                return ""
+            if "open.spotify.com/playlist/" in token:
+                token = token.split("/playlist/", 1)[1]
+                token = token.split("?", 1)[0]
+                token = token.split("/", 1)[0]
+            elif token.startswith("spotify:playlist:"):
+                token = token.split(":")[-1]
+            return token.strip()
+
+        to_upsert: list[tuple[str, str]] = []
+        for line in synced_path.read_text().splitlines():
+            raw = (line or "").strip()
+            if not raw or raw.startswith("#"):
+                continue
+            if "#" in raw:
+                raw = raw.split("#", 1)[0].strip()
+            name = ""
+            token = ""
+            if "=" in raw:
+                left, right = raw.split("=", 1)
+                name = left.strip()
+                token = right.strip()
+            else:
+                token = raw
+
+            pid = extract_id(token)
+            if not pid or not id_re.match(pid):
+                continue
+            if not name:
+                name = pid
+            to_upsert.append((pid, name))
+
+        if not to_upsert:
+            return
+
+        for pid, name in to_upsert:
+            conn.execute(
+                "INSERT INTO playlists (id, name, sync_enabled) VALUES (?, ?, 1) "
+                "ON CONFLICT(id) DO UPDATE SET name=excluded.name, sync_enabled=1, updated_at=CURRENT_TIMESTAMP",
+                (pid, name),
+            )
+
+        _app_state_set(conn, "migrated_synced_txt", "1")
+    except Exception:
+        return
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_def: str) -> bool:
     cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
     if column in cols:
-        return
+        return False
     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_def}")
+    return True
 
 
 # ---------------------------
@@ -194,14 +359,20 @@ def get_missing_tracks(conn, min_duration_sec: int = 60):
                          Set to 0 to include all tracks.
     """
     min_duration_ms = min_duration_sec * 1000
-    return conn.execute("""
+    # Only consider playlists with sync enabled.
+    return conn.execute(
+        """
         SELECT DISTINCT t.id, t.name, t.artist, t.album, t.duration_ms, t.release_date, t.isrc
         FROM tracks t
         JOIN playlist_tracks pt ON pt.track_id = t.id
-        WHERE t.id NOT IN (SELECT track_id FROM files)
+        JOIN playlists p ON p.id = pt.playlist_id
+        WHERE COALESCE(p.sync_enabled, 1) = 1
+          AND t.id NOT IN (SELECT track_id FROM files)
           AND (t.duration_ms IS NULL OR t.duration_ms >= ?)
         ORDER BY t.artist, t.name
-    """, (min_duration_ms,)).fetchall()
+        """,
+        (min_duration_ms,),
+    ).fetchall()
 
 
 def get_orphaned_tracks(conn):

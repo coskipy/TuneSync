@@ -5,10 +5,12 @@ from typing import Optional
 import re
 import os
 
-from PySide6.QtCore import Qt, QUrl, QSize, QRectF, QObject, Signal, QThread, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap, QFontMetrics
+from PySide6.QtCore import Qt, QUrl, QSize, QRectF, QObject, Signal, QThread, QTimer, QPoint, QEvent
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap, QFontMetrics, QIcon, QAction, QActionGroup
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QFrame,
     QGridLayout,
@@ -17,9 +19,11 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QMenu,
     QPushButton,
     QProgressBar,
     QScrollArea,
+    QSplitter,
     QSizePolicy,
     QStackedWidget,
     QToolButton,
@@ -110,6 +114,87 @@ _BLUE = "#2f7cf6"
 _GREEN = "#2ecc71"
 _ORANGE = "#f39c12"
 
+_TOPBAR_ICON_PX = 27  # 50% larger than the previous 18px
+_CONTROL_ICON_PX = 22
+
+
+def _svg_icon(name: str, size: int = 18) -> QIcon:
+    """Load an SVG from lightsync_app/ui/icons and render to a QIcon."""
+    try:
+        from pathlib import Path
+
+        p = Path(__file__).resolve().parent / "icons" / name
+        if not p.exists():
+            return QIcon()
+        renderer = QSvgRenderer(str(p))
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        painter = QPainter(pm)
+        renderer.render(painter)
+        painter.end()
+        return QIcon(pm)
+    except Exception:
+        return QIcon()
+
+
+class _NotificationRow(QFrame):
+    def __init__(self, text: str, *, kind: str = "info"):
+        super().__init__()
+        self.setStyleSheet(
+            "QFrame { background: #0f1216; border: none; border-radius: 12px; }"
+        )
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(10)
+
+        dot = QLabel("●")
+        dot.setFixedWidth(14)
+        if kind == "success":
+            dot.setStyleSheet(f"color: {_GREEN};")
+        elif kind == "error":
+            dot.setStyleSheet("color: #ff5a5f;")
+        else:
+            dot.setStyleSheet("color: #7f8793;")
+        lay.addWidget(dot, 0)
+
+        lbl = QLabel(text)
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("color: #e7eaf0;")
+        lay.addWidget(lbl, 1)
+
+
+class _StorageBar(QFrame):
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(18)
+        self.setStyleSheet("background: #0f1216; border-radius: 9px;")
+
+        self._green = QFrame(self)
+        self._green.setStyleSheet(f"background: {_GREEN}; border-radius: 9px;")
+        self._orange = QFrame(self)
+        self._orange.setStyleSheet(f"background: {_ORANGE}; border-radius: 9px;")
+        self._g = 0
+        self._o = 0
+
+    def set_values(self, green: int, orange: int) -> None:
+        self._g = max(0, int(green))
+        self._o = max(0, int(orange))
+        self.update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        total = self._g + self._o
+        w = self.width()
+        if total <= 0:
+            self._green.setGeometry(0, 0, 0, self.height())
+            self._orange.setGeometry(0, 0, 0, self.height())
+            return
+
+        gw = int(w * (self._g / total))
+        ow = w - gw
+        self._green.setGeometry(0, 0, gw, self.height())
+        self._orange.setGeometry(gw, 0, ow, self.height())
+
 
 def _pill(color: str, text: str) -> str:
     return (
@@ -192,14 +277,12 @@ class PlaylistCard(QFrame):
 
         if is_add:
             lay.addStretch(1)
-            plus = QLabel("+")
-            plus.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
-            f = QFont()
-            f.setPointSize(34)
-            f.setBold(True)
-            plus.setFont(f)
-            plus.setStyleSheet(f"color: {_TEXT};")
-            lay.addWidget(plus)
+            icon_lbl = QLabel()
+            icon_lbl.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
+            icon_lbl.setStyleSheet("background: transparent;")
+            icon_px = int(36 * 1.5)  # 150%
+            icon_lbl.setPixmap(_svg_icon("add.svg", icon_px).pixmap(icon_px, icon_px))
+            lay.addWidget(icon_lbl)
 
             add = QLabel("Add")
             add.setAlignment(Qt.AlignHCenter)
@@ -207,7 +290,7 @@ class PlaylistCard(QFrame):
             f2.setPointSize(14)
             f2.setBold(True)
             add.setFont(f2)
-            add.setStyleSheet(f"color: {_TEXT};")
+            add.setStyleSheet(f"color: {_TEXT}; background: transparent;")
             lay.addWidget(add)
             lay.addStretch(2)
             self.setStyleSheet(
@@ -251,7 +334,7 @@ class PlaylistCard(QFrame):
         v.setContentsMargins(12, 12, 12, 12)
         v.setSpacing(8)
 
-        # Status dot only (tooltip shows status text)
+        # Status indicator only (tooltip shows status text)
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
         top_row.setSpacing(0)
@@ -264,9 +347,23 @@ class PlaylistCard(QFrame):
         dot.setToolTipDuration(5000)
         self._dot_label = dot
 
-        if model.status.lower().startswith("synced"):
+        status_l = (model.status or "").strip().lower()
+        if status_l == "frozen":
+            dot.setText("")
+            dot.setPixmap(_svg_icon("snowflake.svg", 21).pixmap(21, 21))
+            # Make frozen playlists visually "disabled".
+            try:
+                self._dimmer.setStyleSheet(
+                    "QFrame#Dimmer {"
+                    "border-radius: 18px;"
+                    "background: rgba(0, 0, 0, 0.62);"
+                    "}"
+                )
+            except Exception:
+                pass
+        elif status_l.startswith("synced"):
             dot.setStyleSheet(f"color: {_GREEN}; background: transparent;")
-        elif model.status.lower().startswith("sync"):
+        elif status_l.startswith("sync"):
             dot.setStyleSheet(f"color: {_ORANGE}; background: transparent;")
         else:
             dot.setStyleSheet("color: #5b6270; background: transparent;")
@@ -282,7 +379,7 @@ class PlaylistCard(QFrame):
         panel.setObjectName("TextPanel")
         panel.setStyleSheet(
             "QFrame#TextPanel {"
-            "background: rgba(0, 0, 0, 0.45);"
+            "background: rgba(0, 0, 0, 0.68);"
             "border-radius: 12px;"
             "}"
         )
@@ -490,7 +587,7 @@ class SelectablePlaylistCard(QFrame):
         panel.setObjectName("TextPanel")
         panel.setStyleSheet(
             "QFrame#TextPanel {"
-            "background: rgba(0, 0, 0, 0.45);"
+            "background: rgba(0, 0, 0, 0.68);"
             "border-radius: 12px;"
             "}"
         )
@@ -721,9 +818,11 @@ class AddPlaylistsPage(QWidget):
 
     def _on_loaded(self, playlists: list) -> None:
         try:
-            from sync import read_synced
+            from db import get_conn
 
-            already = set(read_synced())
+            conn = get_conn()
+            rows = conn.execute("SELECT id FROM playlists").fetchall()
+            already = {r["id"] for r in rows if r and r["id"]}
         except Exception:
             already = set()
 
@@ -752,7 +851,7 @@ class AddPlaylistsPage(QWidget):
 
     def _render_grid(self) -> None:
         self._clear_grid()
-        col_count = 6
+        col_count = 5
         r = 0
         c = 0
         for p in self._filtered:
@@ -795,36 +894,6 @@ class AddPlaylistsPage(QWidget):
         if token.startswith("spotify:playlist:"):
             return token.split(":")[-1]
         return token
-
-    def _append_to_synced_txt(self, entries: list[tuple[str, str]]) -> None:
-        from pathlib import Path
-
-        path = Path("synced.txt")
-        existing = path.read_text().splitlines() if path.exists() else []
-
-        existing_ids = set()
-        try:
-            from sync import read_synced
-
-            existing_ids = set(read_synced())
-        except Exception:
-            pass
-
-        out = list(existing)
-        if not out:
-            out.append("# LightSync Playlist Configuration")
-            out.append("# Format: PLAYLIST_NAME = spotify_playlist_url")
-            out.append("")
-
-        for pid, name in entries:
-            if pid in existing_ids:
-                continue
-            url = f"https://open.spotify.com/playlist/{pid}"
-            safe_name = (name or pid).replace("\n", " ").strip()
-            out.append(f"{safe_name} = {url}")
-            existing_ids.add(pid)
-
-        path.write_text("\n".join(out).rstrip() + "\n")
 
     def _add_confirm(self) -> None:
         to_add: list[tuple[str, str]] = []
@@ -872,15 +941,17 @@ class AddPlaylistsPage(QWidget):
         if not to_add:
             return
 
-        self._append_to_synced_txt(to_add)
-
-        # Best-effort: upsert into DB so Home shows them immediately.
+        # Upsert into DB (and enable sync) so Home shows them immediately.
         try:
             from db import get_conn, upsert_playlist
 
             conn = get_conn()
             for row in db_rows:
                 upsert_playlist(conn, row)
+                try:
+                    conn.execute("UPDATE playlists SET sync_enabled = 1 WHERE id = ?", (row["id"],))
+                except Exception:
+                    pass
             conn.commit()
         except Exception:
             pass
@@ -927,32 +998,38 @@ class HomeWindow(QMainWindow):
         top.addWidget(avatar)
 
         self.btn_home = QToolButton()
-        self.btn_home.setText("⌂")
+        self.btn_home.setIcon(_svg_icon("home.svg", _TOPBAR_ICON_PX))
+        self.btn_home.setIconSize(QSize(_TOPBAR_ICON_PX, _TOPBAR_ICON_PX))
         self.btn_home.setStyleSheet(
             "QToolButton {"
             "color: #d7dbe3;"
             "background: transparent;"
-            "font-size: 16px;"
             "padding: 4px 6px;"
             "}"
-            "QToolButton:hover { color: white; }"
+            "QToolButton:hover { background: rgba(255,255,255,0.06); border-radius: 8px; }"
         )
         self.btn_home.clicked.connect(self._show_library_page)
         top.addWidget(self.btn_home)
 
-        for icon in ["🔔", "⚙"]:
-            b = QToolButton()
-            b.setText(icon)
-            b.setStyleSheet(
-                "QToolButton {"
-                "color: #d7dbe3;"
-                "background: transparent;"
-                "font-size: 16px;"
-                "padding: 4px 6px;"
-                "}"
-                "QToolButton:hover { color: white; }"
-            )
-            top.addWidget(b)
+        self.btn_notifications = QToolButton()
+        self.btn_notifications.setIcon(_svg_icon("notifications.svg", _TOPBAR_ICON_PX))
+        self.btn_notifications.setIconSize(QSize(_TOPBAR_ICON_PX, _TOPBAR_ICON_PX))
+        self.btn_notifications.setStyleSheet(
+            "QToolButton { background: transparent; padding: 4px 6px; }"
+            "QToolButton:hover { background: rgba(255,255,255,0.06); border-radius: 8px; }"
+        )
+        self.btn_notifications.clicked.connect(self._toggle_notifications)
+        top.addWidget(self.btn_notifications)
+
+        self.btn_settings = QToolButton()
+        self.btn_settings.setIcon(_svg_icon("settings.svg", _TOPBAR_ICON_PX))
+        self.btn_settings.setIconSize(QSize(_TOPBAR_ICON_PX, _TOPBAR_ICON_PX))
+        self.btn_settings.setStyleSheet(
+            "QToolButton { background: transparent; padding: 4px 6px; }"
+            "QToolButton:hover { background: rgba(255,255,255,0.06); border-radius: 8px; }"
+        )
+        self.btn_settings.clicked.connect(self._show_settings_page)
+        top.addWidget(self.btn_settings)
 
         outer.addLayout(top)
 
@@ -985,43 +1062,90 @@ class HomeWindow(QMainWindow):
         controls.addWidget(self.search, 2)
         self.search.textChanged.connect(self._apply_filters)
 
-        self.filter = QComboBox()
-        self.filter.addItems(["Filter", "Synced", "Syncing", "Frozen", "Errors"])
-        self.filter.setFixedHeight(36)
-        self.filter.setStyleSheet(
-            "QComboBox {"
-            "background: #0f1216;"
-            "border: 1px solid #2b2f36;"
-            "border-radius: 18px;"
-            "padding: 0 12px;"
-            "color: #e7eaf0;"
-            "}"
-            "QComboBox::drop-down { border: none; }"
-        )
-        controls.addWidget(self.filter, 0)
+        # Icon-only Filter/Sort menus (no need to show active choice).
+        self._filter_choice: str | None = None
+        self._sort_choice: str | None = None
 
-        self.sort = QComboBox()
-        self.sort.addItems(["Sort", "Latest changes", "Playlist creation date", "Playlist size", "Creator"])
-        self.sort.setFixedHeight(36)
-        self.sort.setStyleSheet(
-            "QComboBox {"
-            "background: #0f1216;"
-            "border: 1px solid #2b2f36;"
-            "border-radius: 18px;"
-            "padding: 0 12px;"
-            "color: #e7eaf0;"
-            "}"
-            "QComboBox::drop-down { border: none; }"
-        )
-        self.sort.currentIndexChanged.connect(lambda _i: self._apply_filters())
-        controls.addWidget(self.sort, 0)
+        def _menu_icon_btn(icon_name: str) -> QToolButton:
+            b = QToolButton()
+            b.setIcon(_svg_icon(icon_name, _CONTROL_ICON_PX))
+            b.setIconSize(QSize(_CONTROL_ICON_PX, _CONTROL_ICON_PX))
+            b.setFixedSize(44, 36)
+            b.setAutoRaise(False)
+            b.setStyleSheet(
+                "QToolButton {"
+                "background: #0f1216;"
+                "border: 1px solid #2b2f36;"
+                "border-radius: 18px;"
+                "padding: 0 10px;"
+                "}"
+                "QToolButton:hover { background: #151a20; }"
+                "QToolButton::menu-indicator { image: none; }"
+            )
+            b.setPopupMode(QToolButton.InstantPopup)
+            return b
+
+        # Filter menu
+        self.filter_btn = _menu_icon_btn("filter.svg")
+        filter_menu = QMenu(self.filter_btn)
+        filter_group = QActionGroup(self.filter_btn)
+        filter_group.setExclusive(True)
+
+        def add_filter_action(label: str, value: str | None, checked: bool = False) -> None:
+            act = QAction(label, self.filter_btn)
+            act.setCheckable(True)
+            act.setChecked(checked)
+            filter_group.addAction(act)
+            filter_menu.addAction(act)
+
+            def on_triggered():
+                self._filter_choice = value
+                self._apply_filters()
+
+            act.triggered.connect(on_triggered)
+
+        add_filter_action("All", None, checked=True)
+        add_filter_action("Synced", "Synced")
+        add_filter_action("Needs sync", "Needs sync")
+        add_filter_action("Syncing", "Syncing")
+        add_filter_action("Frozen", "Frozen")
+        add_filter_action("Errors", "Errors")
+        self.filter_btn.setMenu(filter_menu)
+        controls.addWidget(self.filter_btn, 0)
+
+        # Sort menu
+        self.sort_btn = _menu_icon_btn("sort.svg")
+        sort_menu = QMenu(self.sort_btn)
+        sort_group = QActionGroup(self.sort_btn)
+        sort_group.setExclusive(True)
+
+        def add_sort_action(label: str, value: str | None, checked: bool = False) -> None:
+            act = QAction(label, self.sort_btn)
+            act.setCheckable(True)
+            act.setChecked(checked)
+            sort_group.addAction(act)
+            sort_menu.addAction(act)
+
+            def on_triggered():
+                self._sort_choice = value
+                self._apply_filters()
+
+            act.triggered.connect(on_triggered)
+
+        add_sort_action("Default", None, checked=True)
+        add_sort_action("Latest changes", "Latest changes")
+        add_sort_action("Playlist creation date", "Playlist creation date")
+        add_sort_action("Playlist size", "Playlist size")
+        add_sort_action("Creator", "Creator")
+        self.sort_btn.setMenu(sort_menu)
+        controls.addWidget(self.sort_btn, 0)
 
         controls.addStretch(1)
 
-        right = QVBoxLayout()
+        right = QHBoxLayout()
         right.setSpacing(10)
 
-        self.remove_btn = QPushButton("REMOVE")
+        self.remove_btn = QPushButton("Remove")
         self.remove_btn.setFixedSize(140, 38)
         self.remove_btn.setEnabled(False)
         self.remove_btn.setVisible(False)
@@ -1039,6 +1163,25 @@ class HomeWindow(QMainWindow):
         self.remove_btn.clicked.connect(self._remove_selected_playlists)
         right.addWidget(self.remove_btn, 0, Qt.AlignRight)
 
+        self.toggle_sync_btn = QPushButton("Toggle Sync")
+        self.toggle_sync_btn.setFixedSize(140, 38)
+        self.toggle_sync_btn.setEnabled(False)
+        self.toggle_sync_btn.setVisible(False)
+        self.toggle_sync_btn.setStyleSheet(
+            "QPushButton {"
+            "background: #2b2f36;"
+            "color: #e7eaf0;"
+            "border: none;"
+            "border-radius: 10px;"
+            "font-weight: 800;"
+            "letter-spacing: 0.5px;"
+            "}"
+            "QPushButton:hover { background: #343a43; }"
+            "QPushButton:disabled { background: #1a1e24; color: #7f8793; }"
+        )
+        self.toggle_sync_btn.clicked.connect(self._toggle_sync_selected_playlists)
+        right.addWidget(self.toggle_sync_btn, 0, Qt.AlignRight)
+
         self.sync_now = QPushButton("SYNC NOW")
         self.sync_now.setFixedSize(140, 38)
         self.sync_now.setStyleSheet(
@@ -1054,20 +1197,6 @@ class HomeWindow(QMainWindow):
             "QPushButton:pressed { background: #1f5fc8; }"
         )
         right.addWidget(self.sync_now, 0, Qt.AlignRight)
-
-        auto_row = QHBoxLayout()
-        auto = QLabel("AUTO SYNC")
-        auto.setStyleSheet("font-weight: 800;")
-        auto_row.addWidget(auto)
-
-        self.auto_sync = QToolButton()
-        self.auto_sync.setCheckable(True)
-        self.auto_sync.setChecked(True)
-        self._update_toggle_style()
-        self.auto_sync.clicked.connect(self._update_toggle_style)
-        auto_row.addWidget(self.auto_sync)
-        auto_row.setAlignment(Qt.AlignRight)
-        right.addLayout(auto_row)
 
         controls.addLayout(right)
         lib_outer.addLayout(controls)
@@ -1126,6 +1255,8 @@ class HomeWindow(QMainWindow):
         # Details dropdown (downloads list)
         self.details_panel = QFrame()
         self.details_panel.setVisible(False)
+        # When hidden, collapse to 0px (used by splitter below).
+        self.details_panel.setMaximumHeight(0)
         self.details_panel.setStyleSheet(
             "QFrame {"
             "background: #0b0e12;"
@@ -1152,8 +1283,6 @@ class HomeWindow(QMainWindow):
         self.downloads_scroll.setWidget(self.downloads_content)
         dp_lay.addWidget(self.downloads_scroll, 1)
 
-        lib_outer.addWidget(self.details_panel)
-
         # Grid of cards
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1167,9 +1296,136 @@ class HomeWindow(QMainWindow):
         self.grid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
         scroll.setWidget(content)
-        lib_outer.addWidget(scroll, 1)
+
+        # Splitter so the details dropdown is resizable.
+        self.library_splitter = QSplitter(Qt.Vertical)
+        self.library_splitter.setHandleWidth(10)
+        self.library_splitter.setStyleSheet(
+            "QSplitter::handle { background: transparent; }"
+            "QSplitter::handle:vertical { height: 10px; }"
+        )
+        self.library_splitter.setChildrenCollapsible(False)
+        self.library_splitter.addWidget(self.details_panel)
+        self.library_splitter.addWidget(scroll)
+        self.library_splitter.setStretchFactor(0, 0)
+        self.library_splitter.setStretchFactor(1, 1)
+        self.library_splitter.setCollapsible(0, True)
+        self.library_splitter.setCollapsible(1, False)
+
+        lib_outer.addWidget(self.library_splitter, 1)
 
         self.stack.addWidget(self.library_page)
+
+        # -----------------
+        # Settings page
+        # -----------------
+        self.settings_page = QWidget()
+        s_outer = QVBoxLayout(self.settings_page)
+        s_outer.setContentsMargins(0, 0, 0, 0)
+        s_outer.setSpacing(16)
+
+        # Storage
+        storage_title = QLabel("Storage")
+        storage_title.setStyleSheet("font-weight: 900; font-size: 16px;")
+        s_outer.addWidget(storage_title)
+
+        storage_row = QHBoxLayout()
+        storage_lbl = QLabel("Local storage folder")
+        storage_lbl.setStyleSheet(f"color: {_MUTED};")
+        storage_row.addWidget(storage_lbl, 1)
+
+        self.storage_path = QLabel("")
+        self.storage_path.setStyleSheet("color: #e7eaf0;")
+        self.storage_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.storage_path.setWordWrap(True)
+
+        self.browse_btn = QPushButton("Browse")
+        self.browse_btn.setFixedHeight(30)
+        self.browse_btn.setStyleSheet(
+            "QPushButton { background: #e7eaf0; color: #111; border: none; border-radius: 10px; padding: 0 12px; font-weight: 800; }"
+            "QPushButton:hover { background: white; }"
+        )
+        self.browse_btn.clicked.connect(self._browse_storage_folder)
+        storage_row.addWidget(self.browse_btn, 0, Qt.AlignRight)
+        s_outer.addLayout(storage_row)
+        s_outer.addWidget(self.storage_path)
+
+        size_row = QHBoxLayout()
+        self.total_size_lbl = QLabel("Total library size")
+        self.total_size_lbl.setStyleSheet(f"color: {_MUTED};")
+        size_row.addWidget(self.total_size_lbl, 1)
+
+        self.total_size_val = QLabel("—")
+        self.total_size_val.setStyleSheet("color: #e7eaf0; font-weight: 800;")
+        size_row.addWidget(self.total_size_val, 0, Qt.AlignRight)
+        s_outer.addLayout(size_row)
+
+        self.storage_bar = _StorageBar()
+        s_outer.addWidget(self.storage_bar)
+
+        # Accounts
+        accounts_title = QLabel("Accounts")
+        accounts_title.setStyleSheet("font-weight: 900; font-size: 16px; margin-top: 12px;")
+        s_outer.addWidget(accounts_title)
+
+        self.spotify_card = QFrame()
+        self.spotify_card.setStyleSheet("background: #14181d; border-radius: 16px;")
+        sp_lay = QVBoxLayout(self.spotify_card)
+        sp_lay.setContentsMargins(14, 12, 14, 12)
+        sp_lay.setSpacing(8)
+
+        sp_top = QHBoxLayout()
+        sp_name = QLabel("Spotify")
+        sp_name.setStyleSheet("font-weight: 900;")
+        sp_top.addWidget(sp_name)
+        sp_top.addStretch(1)
+
+        self.spotify_logout = QPushButton("Log out")
+        self.spotify_logout.setEnabled(False)
+        self.spotify_logout.setFixedHeight(28)
+        self.spotify_logout.setStyleSheet(
+            "QPushButton { background: #e7eaf0; color: #111; border: none; border-radius: 10px; padding: 0 10px; font-weight: 800; }"
+            "QPushButton:disabled { background: #2b2f36; color: #7f8793; }"
+        )
+        sp_top.addWidget(self.spotify_logout)
+        sp_lay.addLayout(sp_top)
+
+        self.spotify_counts = QLabel("")
+        self.spotify_counts.setStyleSheet(f"color: {_MUTED}; font-weight: 700;")
+        sp_lay.addWidget(self.spotify_counts)
+
+        s_outer.addWidget(self.spotify_card)
+
+        self.soundcloud_card = QFrame()
+        self.soundcloud_card.setStyleSheet("background: #14181d; border-radius: 16px;")
+        sc_lay = QVBoxLayout(self.soundcloud_card)
+        sc_lay.setContentsMargins(14, 12, 14, 12)
+        sc_lay.setSpacing(8)
+
+        sc_top = QHBoxLayout()
+        sc_name = QLabel("SoundCloud")
+        sc_name.setStyleSheet("font-weight: 900;")
+        sc_top.addWidget(sc_name)
+        sc_top.addStretch(1)
+
+        sc_logout = QPushButton("Log out")
+        sc_logout.setEnabled(False)
+        sc_logout.setFixedHeight(28)
+        sc_logout.setStyleSheet(
+            "QPushButton { background: #e7eaf0; color: #111; border: none; border-radius: 10px; padding: 0 10px; font-weight: 800; }"
+            "QPushButton:disabled { background: #2b2f36; color: #7f8793; }"
+        )
+        sc_top.addWidget(sc_logout)
+        sc_lay.addLayout(sc_top)
+
+        sc_counts = QLabel("Not connected")
+        sc_counts.setStyleSheet(f"color: {_MUTED}; font-weight: 700;")
+        sc_lay.addWidget(sc_counts)
+
+        s_outer.addWidget(self.soundcloud_card)
+        s_outer.addStretch(1)
+
+        self.stack.addWidget(self.settings_page)
 
         # -----------------
         # Add playlists page
@@ -1201,27 +1457,270 @@ class HomeWindow(QMainWindow):
         self._tag_total: Optional[int] = None
         self._last_line: str = ""
         self._run_started_at_sql: Optional[str] = None
+        self._notifications: list[dict] = []
+        self._notifications_unread: int = 0
+        self._synced_ids: set[str] = set()
+        self._toggle_sync_mode: str | None = None  # "enable" | "disable" | None
+
+        # Notifications dropdown panel
+        self.notifications_panel = QFrame(self)
+        self.notifications_panel.setVisible(False)
+        self.notifications_panel.setStyleSheet("background: #0b0e12; border-radius: 14px;")
+        self.notifications_panel.setFixedWidth(380)
+        n_lay = QVBoxLayout(self.notifications_panel)
+        n_lay.setContentsMargins(14, 12, 14, 12)
+        n_lay.setSpacing(10)
+
+        n_title = QLabel("Notifications")
+        n_title.setStyleSheet("color: #e7eaf0; font-weight: 900;")
+        n_lay.addWidget(n_title)
+
+        self.notifications_list = QWidget()
+        self.notifications_list_lay = QVBoxLayout(self.notifications_list)
+        self.notifications_list_lay.setContentsMargins(0, 0, 0, 0)
+        self.notifications_list_lay.setSpacing(8)
+        self.notifications_scroll = QScrollArea()
+        self.notifications_scroll.setWidgetResizable(True)
+        self.notifications_scroll.setFrameShape(QFrame.NoFrame)
+        self.notifications_scroll.setStyleSheet("background: transparent;")
+        self.notifications_scroll.setWidget(self.notifications_list)
+        self.notifications_scroll.setFixedHeight(320)
+        n_lay.addWidget(self.notifications_scroll)
+
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                app.installEventFilter(self)
+        except Exception:
+            pass
+
         self._load_cards_from_db()
 
     def _show_library_page(self) -> None:
         self.page_title.setText("Synced Library")
         self.stack.setCurrentWidget(self.library_page)
+        if self.notifications_panel.isVisible():
+            self.notifications_panel.setVisible(False)
+
+    def _show_settings_page(self) -> None:
+        self.page_title.setText("Settings")
+        self.stack.setCurrentWidget(self.settings_page)
+        self._refresh_settings()
+        if self.notifications_panel.isVisible():
+            self.notifications_panel.setVisible(False)
+
+    def _toggle_notifications(self) -> None:
+        if self.notifications_panel.isVisible():
+            self.notifications_panel.setVisible(False)
+            return
+
+        # Position under the notifications button, clamped within the window.
+        try:
+            margin = 10
+            anchor = self.btn_notifications.mapTo(self, QPoint(0, self.btn_notifications.height() + 8))
+            # Right-align the panel to the button.
+            x = anchor.x() + self.btn_notifications.width() - self.notifications_panel.width()
+            y = anchor.y()
+
+            # Ensure the panel fits inside the window.
+            max_panel_h = max(220, self.height() - margin * 2)
+            self.notifications_scroll.setFixedHeight(min(320, max_panel_h - 70))
+            self.notifications_panel.adjustSize()
+
+            x = max(margin, min(x, self.width() - self.notifications_panel.width() - margin))
+            y = max(margin, min(y, self.height() - self.notifications_panel.height() - margin))
+            self.notifications_panel.move(QPoint(x, y))
+            self.notifications_panel.raise_()
+        except Exception:
+            pass
+        self.notifications_panel.setVisible(True)
+        self._mark_notifications_read()
+
+    def eventFilter(self, obj: QObject, event: object) -> bool:
+        try:
+            if self.notifications_panel.isVisible() and isinstance(event, QEvent):
+                if event.type() == QEvent.MouseButtonPress:
+                    try:
+                        gp = event.globalPosition().toPoint()  # type: ignore[attr-defined]
+                    except Exception:
+                        gp = event.globalPos()  # type: ignore[attr-defined]
+                    p = self.mapFromGlobal(gp)
+                    btn_p = self.btn_notifications.mapFromGlobal(gp)
+                    if not self.notifications_panel.geometry().contains(p) and not self.btn_notifications.rect().contains(btn_p):
+                        self.notifications_panel.setVisible(False)
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)  # type: ignore[arg-type]
+
+    def _push_notification(self, text: str, *, kind: str = "info") -> None:
+        self._notifications.insert(0, {"text": text, "kind": kind})
+        self._notifications = self._notifications[:30]
+        self._notifications_unread += 1
+        self._refresh_notifications_icon()
+        self._refresh_notifications_list()
+
+    def _mark_notifications_read(self) -> None:
+        self._notifications_unread = 0
+        self._refresh_notifications_icon()
+
+    def _refresh_notifications_icon(self) -> None:
+        icon_name = "notification_unread.svg" if self._notifications_unread > 0 else "notifications.svg"
+        self.btn_notifications.setIcon(_svg_icon(icon_name, _TOPBAR_ICON_PX))
+
+    def _refresh_notifications_list(self) -> None:
+        while self.notifications_list_lay.count():
+            it = self.notifications_list_lay.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.setParent(None)
+
+        if not self._notifications:
+            empty = QLabel("No notifications yet.")
+            empty.setStyleSheet("color: #a9b0bb;")
+            self.notifications_list_lay.addWidget(empty)
+            return
+
+        for n in self._notifications[:8]:
+            self.notifications_list_lay.addWidget(_NotificationRow(n["text"], kind=n.get("kind") or "info"))
+
+    def _refresh_settings(self) -> None:
+        self._refresh_storage_stats()
+        self._refresh_account_stats()
+
+    def _browse_storage_folder(self) -> None:
+        try:
+            from PySide6.QtWidgets import QFileDialog
+
+            current = (os.getenv("DOWNLOAD_ROOT") or "").strip()
+            start_dir = current if current else ""
+
+            chosen = QFileDialog.getExistingDirectory(self, "Select local storage folder", start_dir)
+
+            if not chosen:
+                return
+
+            msg = (
+                "Use this folder as your Download Root?\n\n"
+                "LightSync will NOT modify or overwrite anything in this folder. "
+                "It will only use it as the location for downloads/rescans.\n\n"
+                f"Selected: {chosen}"
+            )
+            btn = QMessageBox.question(self, "Set Download Root", msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if btn != QMessageBox.Yes:
+                return
+
+            os.environ["DOWNLOAD_ROOT"] = chosen
+            # Persist to a local .env file for the CLI pipeline.
+            from pathlib import Path
+
+            env_path = Path(".env")
+            lines = env_path.read_text().splitlines() if env_path.exists() else []
+            out: list[str] = []
+            wrote = False
+            for line in lines:
+                if line.strip().startswith("DOWNLOAD_ROOT="):
+                    out.append(f"DOWNLOAD_ROOT={chosen}")
+                    wrote = True
+                else:
+                    out.append(line)
+            if not wrote:
+                out.append(f"DOWNLOAD_ROOT={chosen}")
+            env_path.write_text("\n".join(out).rstrip() + "\n")
+
+            # Safety: normalize any absolute paths stored in DB to be relative to the chosen root.
+            # This updates DB only; it does not touch files on disk.
+            try:
+                from pathlib import Path
+
+                from db import get_conn, migrate_files_to_relative
+
+                conn = get_conn()
+                updated = migrate_files_to_relative(conn, Path(chosen))
+                if updated > 0:
+                    self._push_notification(f"Storage updated: normalized {updated} file paths", kind="info")
+            except Exception:
+                pass
+        except Exception:
+            return
+        self._refresh_storage_stats()
+
+    def _refresh_storage_stats(self) -> None:
+        from pathlib import Path
+
+        root = (os.getenv("DOWNLOAD_ROOT") or "").strip()
+        self.storage_path.setText(root or "(DOWNLOAD_ROOT not set)")
+
+        if not root:
+            self.total_size_val.setText("—")
+            self.storage_bar.set_values(0, 0)
+            return
+
+        download_root = Path(root)
+        referenced_size = 0
+        orphan_size = 0
+
+        try:
+            from db import get_conn
+
+            conn = get_conn()
+            rows = conn.execute(
+                """
+                SELECT
+                  f.track_id,
+                  f.file_path,
+                  CASE WHEN EXISTS(
+                    SELECT 1 FROM playlist_tracks pt WHERE pt.track_id = f.track_id
+                  ) THEN 1 ELSE 0 END AS referenced
+                FROM files f
+                """
+            ).fetchall()
+        except Exception:
+            rows = []
+
+        for r in rows:
+            try:
+                p = Path(r["file_path"])
+                if not p.is_absolute():
+                    p = download_root / p
+                if not p.exists():
+                    continue
+                sz = p.stat().st_size
+                if int(r["referenced"]) == 1:
+                    referenced_size += sz
+                else:
+                    orphan_size += sz
+            except Exception:
+                continue
+
+        total = referenced_size + orphan_size
+        self.storage_bar.set_values(referenced_size, orphan_size)
+
+        def fmt(n: int) -> str:
+            gb = n / (1024 * 1024 * 1024)
+            if gb >= 1:
+                return f"{gb:.1f}GB"
+            mb = n / (1024 * 1024)
+            return f"{mb:.0f}MB"
+
+        self.total_size_val.setText(fmt(total) if total > 0 else "0MB")
+
+    def _refresh_account_stats(self) -> None:
+        try:
+            from db import get_conn
+
+            conn = get_conn()
+            pl = conn.execute("SELECT COUNT(*) AS n FROM playlists").fetchone()["n"]
+            songs = conn.execute("SELECT COUNT(DISTINCT track_id) AS n FROM playlist_tracks").fetchone()["n"]
+            self.spotify_counts.setText(f"{pl} synced playlists      {songs} synced songs")
+        except Exception:
+            self.spotify_counts.setText("—")
 
     def _show_add_page(self) -> None:
         self.page_title.setText("Add Playlists")
         self.stack.setCurrentWidget(self.add_page)
         self.add_page.refresh()
-
-    def _update_toggle_style(self):
-        on = self.auto_sync.isChecked()
-        self.auto_sync.setText("   " if on else "   ")
-        self.auto_sync.setFixedSize(46, 22)
-        self.auto_sync.setStyleSheet(
-            "QToolButton {"
-            f"background: {(_BLUE if on else '#2b2f36')};"
-            "border-radius: 11px;"
-            "}"
-        )
+        if self.notifications_panel.isVisible():
+            self.notifications_panel.setVisible(False)
 
     def _clear_grid(self) -> None:
         while self.grid.count():
@@ -1241,6 +1740,7 @@ class HomeWindow(QMainWindow):
                   p.id,
                   p.name,
                   p.creator,
+                                    COALESCE(p.sync_enabled, 1) AS sync_enabled,
                   p.image_url,
                   p.updated_at,
                   p.created_at,
@@ -1259,6 +1759,8 @@ class HomeWindow(QMainWindow):
         except Exception:
             playlists = []
 
+        enabled_ids: set[str] = set()
+
         computed: list[dict] = []
         for p in playlists:
             pid = p["id"]
@@ -1266,17 +1768,31 @@ class HomeWindow(QMainWindow):
             creator = p["creator"] if "creator" in p.keys() else None
             image_url = p["image_url"] if "image_url" in p.keys() else None
 
+            sync_enabled = 1
+            try:
+                if "sync_enabled" in p.keys() and p["sync_enabled"] is not None:
+                    sync_enabled = int(p["sync_enabled"])
+            except Exception:
+                sync_enabled = 1
+            if sync_enabled == 1:
+                enabled_ids.add(pid)
+
             updated_at = p["updated_at"] if "updated_at" in p.keys() else None
             created_at = p["created_at"] if "created_at" in p.keys() else None
             track_count = int(p["track_count"]) if "track_count" in p.keys() and p["track_count"] is not None else 0
 
-            status = "Synced"
+            # Disabled playlists are frozen/stopped.
+            if sync_enabled == 0:
+                status = "Frozen"
+            else:
+                status = "Synced"
             try:
                 missing = int(p["missing_count"]) if "missing_count" in p.keys() and p["missing_count"] is not None else 0
-                if track_count == 0:
-                    status = "Needs sync"
-                elif missing > 0:
-                    status = "Needs sync"
+                if status != "Frozen":
+                    if track_count == 0:
+                        status = "Needs sync"
+                    elif missing > 0:
+                        status = "Needs sync"
             except Exception:
                 pass
 
@@ -1294,21 +1810,26 @@ class HomeWindow(QMainWindow):
             )
 
         self._all_playlists = computed
+        self._synced_ids = set(enabled_ids)
         self._apply_filters()
 
     def _apply_filters(self) -> None:
+        items = list(self._all_playlists)
+
+        filter_choice = getattr(self, "_filter_choice", None)
+        if filter_choice:
+            want = (filter_choice or "").strip().lower()
+            items = [p for p in items if (p.get("status") or "").strip().lower() == want]
+
         q = (self.search.text() or "").strip().lower()
-        # For now, search only. (Filter dropdown can be layered on later.)
-        if not q:
-            items = list(self._all_playlists)
-        else:
+        if q:
             items = [
                 p
-                for p in self._all_playlists
+                for p in items
                 if (q in (p.get("name") or "").lower()) or (q in (p.get("creator") or "").lower())
             ]
 
-        sort_choice = (self.sort.currentText() if hasattr(self, "sort") else "Sort")
+        sort_choice = getattr(self, "_sort_choice", None) or ""
         if sort_choice == "Latest changes":
             items.sort(key=lambda p: (p.get("updated_at") or ""), reverse=True)
         elif sort_choice == "Playlist creation date":
@@ -1382,7 +1903,86 @@ class HomeWindow(QMainWindow):
         n = len(self._selected_playlist_ids)
         self.remove_btn.setVisible(n > 0)
         self.remove_btn.setEnabled(n > 0)
-        self.remove_btn.setText(f"REMOVE ({n})" if n else "REMOVE")
+        self.remove_btn.setText(f"Remove ({n})" if n else "Remove")
+
+        self.toggle_sync_btn.setVisible(n > 0)
+
+        if n == 0:
+            self._toggle_sync_mode = None
+            self.toggle_sync_btn.setEnabled(False)
+            self.toggle_sync_btn.setText("Toggle Sync")
+            return
+
+        selected = sorted(self._selected_playlist_ids)
+        states = {pid in getattr(self, "_synced_ids", set()) for pid in selected}
+        if len(states) != 1:
+            # Mixed selection => ambiguous action.
+            self._toggle_sync_mode = None
+            self.toggle_sync_btn.setEnabled(False)
+            self.toggle_sync_btn.setText("Toggle Sync")
+            return
+
+        enabled = True in states
+        if enabled:
+            self._toggle_sync_mode = "disable"
+            self.toggle_sync_btn.setEnabled(True)
+            self.toggle_sync_btn.setText("Toggle Sync")
+        else:
+            self._toggle_sync_mode = "enable"
+            self.toggle_sync_btn.setEnabled(True)
+            self.toggle_sync_btn.setText("Enable Sync")
+
+    def _toggle_sync_selected_playlists(self) -> None:
+        ids = sorted(self._selected_playlist_ids)
+        if not ids:
+            return
+
+        mode = getattr(self, "_toggle_sync_mode", None)
+        if mode not in {"enable", "disable"}:
+            return
+
+        if mode == "disable":
+            msg = (
+                f"Disable syncing for {len(ids)} playlist(s)?\n\n"
+                "This keeps your downloaded songs and the database entries, but future syncs will not update them."
+            )
+            btn = QMessageBox.question(self, "Toggle Sync", msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if btn != QMessageBox.Yes:
+                return
+            try:
+                from db import get_conn
+
+                conn = get_conn()
+                q = ",".join("?" for _ in ids)
+                conn.execute(f"UPDATE playlists SET sync_enabled = 0 WHERE id IN ({q})", tuple(ids))
+                conn.commit()
+            except Exception:
+                pass
+            note = f"Sync disabled for {len(ids)} playlist(s)"
+        else:
+            msg = (
+                f"Enable syncing for {len(ids)} playlist(s)?\n\n"
+                "Future syncs will update them."
+            )
+            btn = QMessageBox.question(self, "Enable Sync", msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if btn != QMessageBox.Yes:
+                return
+            try:
+                from db import get_conn
+
+                conn = get_conn()
+                q = ",".join("?" for _ in ids)
+                conn.execute(f"UPDATE playlists SET sync_enabled = 1 WHERE id IN ({q})", tuple(ids))
+                conn.commit()
+            except Exception:
+                pass
+            note = f"Sync enabled for {len(ids)} playlist(s)"
+
+        self._selected_playlist_ids.clear()
+        self._toggle_sync_mode = None
+        self._update_remove_button()
+        self._load_cards_from_db()
+        self._push_notification(note, kind="info")
 
     def _remove_selected_playlists(self) -> None:
         from pathlib import Path
@@ -1410,43 +2010,6 @@ class HomeWindow(QMainWindow):
                     download_root = p
         except Exception:
             download_root = None
-
-        # Update synced.txt (remove lines whose playlist id matches)
-        try:
-            from sync import _parse_synced_line  # type: ignore
-
-            parse_line = _parse_synced_line
-        except Exception:
-
-            def parse_line(line: str):
-                raw = (line or "").strip()
-                if not raw or raw.startswith("#"):
-                    return None
-                # strip trailing comment
-                if "#" in raw:
-                    raw = raw.split("#", 1)[0].strip()
-                if ("=" in raw) or ("|" in raw):
-                    right = raw.split("=", 1)[1] if "=" in raw else raw.split("|", 1)[1]
-                    token = right.strip()
-                else:
-                    token = raw
-                token = token.strip()
-                if "open.spotify.com/playlist/" in token:
-                    pid = token.split("/playlist/", 1)[1].split("?", 1)[0].split("/", 1)[0]
-                    return (pid, None)
-                if token.startswith("spotify:playlist:"):
-                    return (token.split(":")[-1], None)
-                return (token, None)
-
-        synced_path = Path("synced.txt")
-        if synced_path.exists():
-            kept: list[str] = []
-            for line in synced_path.read_text().splitlines():
-                parsed = parse_line(line)
-                if parsed and parsed[0] in ids:
-                    continue
-                kept.append(line)
-            synced_path.write_text("\n".join(kept).rstrip() + "\n")
 
         # Remove from DB and delete newly-orphaned tracks/files
         deleted_files = 0
@@ -1560,6 +2123,8 @@ class HomeWindow(QMainWindow):
         self._set_progress_indeterminate(True)
         self._update_run_detail()
 
+        self._push_notification("Sync started", kind="info")
+
         # Mark the start time in SQLite's CURRENT_TIMESTAMP format (UTC)
         try:
             from datetime import datetime, timezone
@@ -1605,17 +2170,48 @@ class HomeWindow(QMainWindow):
             self._load_downloaded_details()
             self._load_cards_from_db()
 
+            if int(_code or 0) != 0:
+                tail = (self._last_line or "").strip()
+                self._push_notification(f"Download failed" + (f": {tail}" if tail else ""), kind="error")
+            else:
+                if self._downloaded_ok is not None and int(self._downloaded_ok) > 0:
+                    self._push_notification(f"Success: {int(self._downloaded_ok)} songs downloaded", kind="success")
+                else:
+                    self._push_notification("Sync finished", kind="success")
+
         proc.finished.connect(finished)
+
+        def on_error(_err):
+            tail = (self._last_line or "").strip()
+            self._push_notification(f"Download failed" + (f": {tail}" if tail else ""), kind="error")
+
+        try:
+            proc.errorOccurred.connect(on_error)
+        except Exception:
+            pass
         self._sync_proc = proc
         if not self._downloads_timer.isActive():
             self._downloads_timer.start()
         proc.start()
 
     def _toggle_details(self, on: bool) -> None:
-        self.details_panel.setVisible(on)
         self.details_btn.setText("Details ▴" if on else "Details ▾")
+
+        splitter = getattr(self, "library_splitter", None)
         if on:
+            self.details_panel.setMaximumHeight(16777215)
+            self.details_panel.setVisible(True)
+            if splitter is not None:
+                total_h = max(1, splitter.height())
+                open_h = min(360, max(220, total_h // 3))
+                splitter.setSizes([open_h, max(1, total_h - open_h)])
             self._load_downloaded_details()
+        else:
+            if splitter is not None:
+                total_h = max(1, splitter.height())
+                splitter.setSizes([0, total_h])
+            self.details_panel.setVisible(False)
+            self.details_panel.setMaximumHeight(0)
 
     def _clear_downloads(self) -> None:
         while self.downloads_lay.count():

@@ -4,7 +4,7 @@ Automatically sync your Spotify playlists to local files for Rekordbox.
 
 Downloads high-quality audio from SoundCloud/YouTube, tags with Spotify metadata, and exports to Rekordbox XML.
 
-## � Quick Setup
+## ⚡ Quick Setup
 
 ### 1. Install ffmpeg
 
@@ -50,7 +50,7 @@ The setup script will:
 
 ```bash
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-python main.py
+python -m lightsync_app
 ```
 
 Your browser will open for Spotify authorization on first run. That's it!
@@ -64,25 +64,13 @@ Your browser will open for Spotify authorization on first run. That's it!
 
 ## 🎯 Adding Playlists
 
-LightSync reads from `synced.txt` to know which playlists to sync.
+Playlists are managed in the app and stored in the SQLite database (`capsize.sqlite3`).
 
-Create a `synced.txt` file with your playlist URLs:
+1. Open the app: `python -m lightsync_app`
+2. Go to **Add Playlists**
+3. Select playlists and enable syncing
 
-```
-House Classics = https://open.spotify.com/playlist/37i9dQZF1DX4dyzvuaRJ0n
-Techno Bangers = https://open.spotify.com/playlist/37i9dQZF1DX6J5NfMJS675
-Deep House = https://open.spotify.com/playlist/37i9dQZF1DXa8NOEUWPn9W
-```
-
-Format: `PLAYLIST_NAME = spotify_playlist_url`
-
-To find your playlist URLs:
-
-1. Open Spotify
-2. Right-click a playlist → Share → Copy link to playlist
-3. Add to `synced.txt` with a name
-
-Run `python main.py` to sync!
+If you prefer CLI-only operation, you can still run `python main.py` to sync using whatever playlists are currently enabled in the DB.
 
 ## ⚙️ Configuration
 
@@ -113,7 +101,7 @@ Just activate the virtual environment and run:
 
 ```bash
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-python main.py
+python -m lightsync_app
 ```
 
 It only downloads new/missing tracks - existing files are skipped.
@@ -176,7 +164,7 @@ cp .env.example .env
 nano .env
 
 # Run
-python main.py
+python -m lightsync_app
 ```
 
 ---

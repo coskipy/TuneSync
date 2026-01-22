@@ -169,30 +169,6 @@ REKORDBOX_XML_PATH={xml_path}
     print(f"\n✅ Configuration saved to .env")
     print(f"   Music will be saved to: {download_path}")
 
-
-def create_synced_file():
-    """Create synced.txt template if it doesn't exist"""
-    synced_path = Path("synced.txt")
-    if not synced_path.exists():
-        if Path("synced.txt.example").exists():
-            import shutil
-            shutil.copy("synced.txt.example", "synced.txt")
-            print("✅ Created synced.txt from template")
-        else:
-            synced_content = """# Add your Spotify playlists here
-# Format: PLAYLIST_NAME = spotify_playlist_url
-#
-# Example:
-# My House Mix = https://open.spotify.com/playlist/37i9dQZF1DX4dyzvuaRJ0n
-
-"""
-            synced_path.write_text(synced_content)
-            print("✅ Created synced.txt template")
-        print("   Edit synced.txt to add your playlists!")
-    else:
-        print("✅ synced.txt already exists")
-
-
 def print_completion():
     """Print setup completion message"""
     print_step(6, "Setup complete! 🎉")
@@ -202,25 +178,24 @@ def print_completion():
     print("="*60)
     
     print("\n📝 Next steps:")
-    print("\n1. Edit synced.txt and add your Spotify playlists:")
-    print("   Format: PLAYLIST_NAME = spotify_playlist_url")
-    print("   Example: My Mix = https://open.spotify.com/playlist/...")
-    
-    print("\n2. Run LightSync:\n")
+
+    print("\n1. Activate the virtual environment:\n")
     
     if platform.system() == "Windows":
         print("     .venv\\Scripts\\activate")
     else:
         print("     source .venv/bin/activate")
     
-    print("     python main.py")
-    
+    print("\n2. Run the LightSync app:\n")
+    print("     python -m lightsync_app")
+
     print("\n   Your browser will open for Spotify authorization on first run.")
+    print("\n3. Add playlists from inside the app (Add Playlists).")
     
     print("\n💡 Tips:")
     print("  - Edit .env to change download location")
     print("  - Edit main.py to change MAX_WORKERS for faster downloads")
-    print("  - Run 'python main.py' anytime to sync new tracks")
+    print("  - Use the app to sync/export, or run 'python main.py' for CLI sync")
     print("\n")
 
 
@@ -233,7 +208,6 @@ def main():
         create_venv()
         install_dependencies()
         create_env_file()
-        create_synced_file()
         print_completion()
         
     except KeyboardInterrupt:

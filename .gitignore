@@ -6,7 +6,6 @@ capsize.sqlite3
 
 # Cache and sync files
 .cache/
-synced.txt
 synced_backup.txt
 
 # Python

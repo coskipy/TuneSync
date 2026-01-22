@@ -62,7 +62,7 @@ REKORDBOX_XML_PATH=/Users/yourname/Music/DJ/rekordbox.xml
 ## Step 5: Run!
 
 ```bash
-python main.py
+python -m lightsync_app
 ```
 
 On first run:
@@ -70,6 +70,11 @@ On first run:
 -   Your browser will open
 -   Click "Agree" to authorize
 -   LightSync will start syncing!
+
+Inside the app:
+
+-   Use **Add Playlists** to select what to sync
+-   Use the sync/export actions to run the pipeline
 
 ## 🎉 That's It!
 

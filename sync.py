@@ -13,100 +13,43 @@ from db import (
     get_orphaned_tracks,
 )
 
-SYNCED_FILE = Path("synced.txt")
 
-
-# ---------------------------
-# synced.txt parsing
-# ---------------------------
-
-def _extract_playlist_id(token: str) -> str:
-    token = token.strip()
-    if not token:
-        return ""
-    # Full URL
-    if "open.spotify.com/playlist/" in token:
-        return token.split("/")[-1].split("?")[0]
-    # Spotify URI
-    if token.startswith("spotify:playlist:"):
-        return token.split(":")[-1]
-    # Plain ID
-    return token
-
-
-def _parse_synced_line(line: str) -> Optional[Tuple[str, Optional[str]]]:
-    """
-    Returns (playlist_id, alias) or None if the line should be ignored.
-    Supports:
-      - "<url_or_id>"
-      - "<url_or_id> # alias"
-      - "alias = <url_or_id>"
-      - "alias | <url_or_id>"
-    """
-    raw = line.strip()
-    if not raw or raw.startswith("#"):
-        return None
-
-    alias = None
-    # Allow trailing "# alias"
-    if "#" in raw:
-        left, comment = raw.split("#", 1)
-        raw = left.strip()
-        alias = (comment or "").strip() or None
-
-    # Allow "alias = url_or_id" or "alias | url_or_id"
-    if ("=" in raw) or ("|" in raw):
-        if "=" in raw:
-            name, right = raw.split("=", 1)
+def _sync_enabled_playlist_ids(conn) -> List[str]:
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(playlists)").fetchall()]
+        if "sync_enabled" in cols:
+            rows = conn.execute(
+                "SELECT id FROM playlists WHERE COALESCE(sync_enabled, 1) = 1 ORDER BY name"
+            ).fetchall()
         else:
-            name, right = raw.split("|", 1)
-        alias = alias or name.strip() or None
-        pid = _extract_playlist_id(right.strip())
-    else:
-        pid = _extract_playlist_id(raw)
-
-    if not pid:
-        return None
-    return (pid, alias)
-
-
-def read_synced() -> List[str]:
-    """Return playlist IDs from synced.txt."""
-    if not SYNCED_FILE.exists():
+            # Back-compat: older DBs treat all playlists as enabled.
+            rows = conn.execute("SELECT id FROM playlists ORDER BY name").fetchall()
+        return [r["id"] for r in rows]
+    except Exception:
         return []
-    ids: List[str] = []
-    for line in SYNCED_FILE.read_text().splitlines():
-        parsed = _parse_synced_line(line)
-        if not parsed:
-            continue
-        pid, _ = parsed
-        ids.append(pid)
-    # de-dupe while preserving order
-    seen = set()
-    uniq = []
-    for pid in ids:
-        if pid not in seen:
-            uniq.append(pid)
-            seen.add(pid)
-    return uniq
+
+
+def read_desired_playlist_ids(conn) -> List[str]:
+    """Return desired playlist IDs from SQLite (DB is source of truth)."""
+    return _sync_enabled_playlist_ids(conn)
 
 
 def get_synced_alias_map() -> Dict[str, str]:
-    """
-    Return {playlist_id: alias} for lines where you provided a friendly name.
-    Exporters (XML/M3U) can use this for display names.
-    """
-    out: Dict[str, str] = {}
-    if not SYNCED_FILE.exists():
-        return out
-    for line in SYNCED_FILE.read_text().splitlines():
-        parsed = _parse_synced_line(line)
-        if not parsed:
-            continue
-        pid, alias = parsed
-        if alias:
-            out[pid] = alias
-    return out
+    """Return {playlist_id: display_name} for enabled playlists."""
+    try:
+        conn = get_conn()
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(playlists)").fetchall()]
+        if "sync_enabled" in cols:
+            rows = conn.execute(
+                "SELECT id, name FROM playlists WHERE COALESCE(sync_enabled, 1) = 1"
+            ).fetchall()
+            out_db: Dict[str, str] = {}
+            for r in rows:
+                if r and r["id"] and r["name"]:
+                    out_db[r["id"]] = r["name"]
+            return out_db
+    except Exception:
+        return {}
 
 
 # ---------------------------
@@ -129,12 +72,8 @@ def _refresh_playlist_links(conn, playlist_id: str, tracks: List[dict]) -> None:
 
 
 def _delete_stale_playlists(conn, keep_ids: set[str]) -> None:
-    """Delete playlists that are no longer listed in synced.txt (cascades links)."""
-    if not keep_ids:
-        conn.execute("DELETE FROM playlists")
-        return
-    qmarks = ",".join("?" for _ in keep_ids)
-    conn.execute(f"DELETE FROM playlists WHERE id NOT IN ({qmarks})", tuple(keep_ids))
+    """Deprecated: playlists are now kept in DB even when disabled."""
+    return
 
 
 # ---------------------------
@@ -143,8 +82,8 @@ def _delete_stale_playlists(conn, keep_ids: set[str]) -> None:
 
 def sync() -> Tuple[List[dict], List[dict], bool]:
     """
-    1) Read desired playlists from synced.txt (with aliases supported)
-    2) Remove stale playlists from DB
+    1) Read desired playlists from SQLite (playlists.sync_enabled)
+    2) Sync only enabled playlists (disabled playlists are kept in DB)
     3) For each desired playlist:
          - upsert playlist row
          - if snapshot_id changed (or new), fetch tracks, upsert tracks, refresh links
@@ -152,21 +91,16 @@ def sync() -> Tuple[List[dict], List[dict], bool]:
     4) Return (missing_tracks, orphaned_tracks, playlists_changed)
     """
     conn = get_conn()
-    desired_ids = set(read_synced())
+    desired_ids = set(read_desired_playlist_ids(conn))
 
-    # If no desired playlists, clear playlists and finish
+    # If no desired playlists, do nothing.
     if not desired_ids:
-        _delete_stale_playlists(conn, set())
-        conn.commit()
         missing = []
         orphaned = get_orphaned_tracks(conn)
-        print("✅ Sync complete (no desired playlists listed).")
+        print("✅ Sync complete (no playlists enabled).")
         return (missing, orphaned, False)
 
-    # Prune anything not listed
-    _delete_stale_playlists(conn, desired_ids)
-
-    print(f"🔄 Syncing {len(desired_ids)} playlists from Spotify...")
+    print(f"🔄 Syncing {len(desired_ids)} enabled playlists from Spotify...")
     
     total = len(desired_ids)
     
