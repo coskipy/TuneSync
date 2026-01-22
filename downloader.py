@@ -148,31 +148,6 @@ def _human_time(sec: Optional[float]) -> str:
     return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:d}:{s:02d}"
 
 
-def _get_unique_filename(out_root: Path, base: str, track_id: str) -> str:
-    """
-    Get a unique filename. If collision detected, append track_id suffix.
-    Returns the base name (without extension) that's guaranteed to be unique.
-    """
-    # Check if base name is already in use by different track_id
-    for ext in ("m4a", "mp3", "flac", "wav", "aiff", "alac", "aac", "webm", "opus"):
-        p = (out_root / base).with_suffix(f".{ext}")
-        if p.exists():
-            # Try to read which track_id owns this file
-            try:
-                conn = get_conn()
-                row = conn.execute(
-                    "SELECT track_id FROM files WHERE file_path LIKE ?",
-                    (f"%{p.name}%",)
-                ).fetchone()
-                if row and row["track_id"] != track_id:
-                    # Collision! Different track owns this file. Append track_id
-                    base_with_id = f"{base} [{track_id[:8]}]"
-                    return base_with_id
-            except Exception:
-                pass
-    return base
-
-
 def _safe_duration_seconds(path: Path) -> Optional[float]:
     """Return duration in seconds using mutagen; None if unavailable."""
     try:
@@ -653,10 +628,8 @@ def download_track(
     label = f"{artist} - {title}"
     try:
         out_root.mkdir(parents=True, exist_ok=True)
-        base = _sanitize(label)
-        
-        # Check for existing files with same base name but different track_id
-        base = _get_unique_filename(out_root, base, track_id)  # Handle collisions
+        # Always include track_id in filename to guarantee uniqueness
+        base = f"{_sanitize(label)} [{track_id[:8]}]"
         conn = get_conn()
 
         # Short-circuit if a compatible file already exists
@@ -716,46 +689,43 @@ def download_track(
                     # Use the file yt-dlp actually created
                     final = Path(actual_filepath)
                 else:
-                    # Fallback: try to find the file ourselves
-                    ext = (info.get("ext") or "").lower()
+                    # Fallback: search by track_id only (most reliable)
+                    track_id_short = track_id[:8]
                     final = None
                     
-                    # Wait a moment for filesystem to catch up, then try to find the file
+                    # Wait a moment for filesystem to catch up, then search by track_id
                     for retry in range(8):
-                        # Try exact match first
-                        if ext:
-                            p = (out_root / base).with_suffix(f".{ext}")
-                            if p.exists():
-                                final = p
-                                break
-                        
-                        # Try all known audio extensions
                         for audio_ext in ("m4a", "mp3", "opus", "webm", "aac", "mp4", "flac", "wav"):
-                            p = (out_root / base).with_suffix(f".{audio_ext}")
-                            if p.exists():
-                                final = p
+                            # Search for ANY file containing our track_id
+                            pattern = f"*[{track_id_short}]*.{audio_ext}"
+                            matches = list(out_root.glob(pattern))
+                            if matches:
+                                # Take the most recently created matching file
+                                found = max(matches, key=lambda p: p.stat().st_mtime)
+                                # Rename to our expected format for consistency
+                                expected_name = f"{base}.{audio_ext}"
+                                expected_path = out_root / expected_name
+                                if found != expected_path:
+                                    try:
+                                        found.rename(expected_path)
+                                        final = expected_path
+                                    except OSError:
+                                        # If rename fails, use what we found
+                                        final = found
+                                else:
+                                    final = found
                                 break
-                        
-                        if final:
-                            break
-                        
-                        # Last resort: glob for recently created files
-                        if retry > 3:
-                            for audio_ext in ("m4a", "mp3", "opus", "webm", "aac", "mp4"):
-                                matches = list(out_root.glob(f"*.{audio_ext}"))
-                                if matches:
-                                    # Take the most recently created file
-                                    final = max(matches, key=lambda p: p.stat().st_mtime)
-                                    break
                         
                         if final:
                             break
                         time.sleep(0.5)
                     
                     if not final:
+                        # Debug: show what we were looking for
+                        debug_msg = f"Download reported success but file not found. Expected: {base}.* in {out_root}"
                         return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
                                               source_url=u,
-                                              error="Download reported success but file not found")
+                                              error=debug_msg)
 
                 # Check if the downloaded file is a preview (< 60 seconds)
                 actual_duration = _safe_duration_seconds(final)
