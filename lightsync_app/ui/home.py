@@ -5,14 +5,15 @@ from typing import Optional
 import re
 import os
 
-from PySide6.QtCore import Qt, QUrl, QSize, QRectF, QObject, Signal, QThread, QTimer, QPoint, QEvent, QSettings
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap, QFontMetrics, QIcon, QAction, QActionGroup
+from PySide6.QtCore import Qt, QUrl, QSize, QRect, QRectF, QObject, Signal, QThread, QTimer, QPoint, QEvent, QSettings
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPixmap, QFontMetrics, QIcon, QAction, QActionGroup, QPolygon
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFrame,
+    QGraphicsDropShadowEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -118,6 +119,286 @@ _ORANGE = "#f39c12"
 
 _TOPBAR_ICON_PX = 27  # 50% larger than the previous 18px
 _CONTROL_ICON_PX = 22
+
+
+class _TipPopover(QFrame):
+    closed = Signal()
+    next_clicked = Signal()
+    hide_clicked = Signal()
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setObjectName("TipPopover")
+        self.setVisible(False)
+
+        self._arrow_dir: str = "up"  # "up" or "down"
+        self._arrow_x = 120
+        self._radius = 14
+        self._arrow_w = 18
+        self._arrow_h = 10
+
+        self.setStyleSheet(
+            "QFrame#TipPopover { background: transparent; }"
+            "QLabel { color: white; }"
+        )
+
+        self._card = QFrame(self)
+        self._card.setObjectName("TipCard")
+        self._card.setStyleSheet(
+            "QFrame#TipCard {"
+            f"background: {_BLUE};"
+            "border-radius: 14px;"
+            "}"
+        )
+
+        lay = QVBoxLayout(self._card)
+        lay.setContentsMargins(16, 14, 16, 12)
+        lay.setSpacing(8)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(8)
+        self._title = QLabel("")
+        self._title.setStyleSheet("font-weight: 900; font-size: 18px;")
+        top.addWidget(self._title, 1)
+
+        self._close = QToolButton()
+        self._close.setText("✕")
+        self._close.setStyleSheet(
+            "QToolButton { background: rgba(255,255,255,0.18); color: white; border: none; border-radius: 12px; padding: 4px 8px; }"
+            "QToolButton:hover { background: rgba(255,255,255,0.26); }"
+        )
+        self._close.clicked.connect(self._on_close)
+        top.addWidget(self._close, 0, Qt.AlignTop)
+        lay.addLayout(top)
+
+        self._body = QLabel("")
+        self._body.setWordWrap(True)
+        self._body.setStyleSheet("font-size: 15px; line-height: 1.25;")
+        lay.addWidget(self._body)
+
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(10)
+
+        self._hide = QToolButton()
+        self._hide.setText("Hide these tips")
+        self._hide.setStyleSheet(
+            "QToolButton { background: transparent; color: rgba(255,255,255,0.85); border: none; text-decoration: underline; }"
+            "QToolButton:hover { color: white; }"
+        )
+        self._hide.clicked.connect(lambda: self.hide_clicked.emit())
+        bottom.addWidget(self._hide, 0, Qt.AlignLeft)
+        bottom.addStretch(1)
+
+        self._next = QPushButton("Next")
+        self._next.setFixedSize(104, 36)
+        self._next.setStyleSheet(
+            "QPushButton { background: rgba(255,255,255,0.95); color: #1b3b78; border: none; border-radius: 8px; font-weight: 900; }"
+            "QPushButton:hover { background: white; }"
+            "QPushButton:disabled { background: rgba(255,255,255,0.55); color: rgba(27,59,120,0.75); }"
+        )
+        self._next.clicked.connect(lambda: self.next_clicked.emit())
+        bottom.addWidget(self._next, 0, Qt.AlignRight)
+        lay.addLayout(bottom)
+
+        # Soft shadow for the whole popover.
+        try:
+            eff = QGraphicsDropShadowEffect(self)
+            eff.setBlurRadius(26)
+            eff.setOffset(0, 10)
+            eff.setColor(QColor(0, 0, 0, 140))
+            self._card.setGraphicsEffect(eff)
+        except Exception:
+            pass
+
+    def _on_close(self) -> None:
+        self.setVisible(False)
+        self.closed.emit()
+
+    def set_content(self, *, title: str, body: str, next_text: str = "Next", next_enabled: bool = True) -> None:
+        self._title.setText(title)
+        self._body.setText(body)
+        self._next.setText(next_text)
+        self._next.setEnabled(bool(next_enabled))
+
+    def set_anchor(self, *, anchor_global: QPoint, prefer_below: bool = True, window_rect_global: QRectF | None = None) -> None:
+        # Compute popover placement and arrow direction.
+        if window_rect_global is None:
+            try:
+                top_left = self.parentWidget().mapToGlobal(QPoint(0, 0))  # type: ignore[union-attr]
+                window_rect_global = QRectF(top_left.x(), top_left.y(), float(self.parentWidget().width()), float(self.parentWidget().height()))  # type: ignore[union-attr]
+            except Exception:
+                window_rect_global = QRectF(float(anchor_global.x() - 300), float(anchor_global.y() - 200), 600.0, 400.0)
+
+        w = self.sizeHint().width()
+        h = self.sizeHint().height()
+
+        margin = 10
+        arrow_gap = 10
+
+        # Start with below.
+        x = int(anchor_global.x() - (w / 2))
+        y_below = int(anchor_global.y() + arrow_gap)
+        y_above = int(anchor_global.y() - arrow_gap - h)
+
+        fits_below = (y_below + h) <= int(window_rect_global.y() + window_rect_global.height() - margin)
+        fits_above = y_above >= int(window_rect_global.y() + margin)
+
+        place_below = prefer_below
+        if place_below and not fits_below and fits_above:
+            place_below = False
+        if (not place_below) and not fits_above and fits_below:
+            place_below = True
+
+        y = y_below if place_below else y_above
+        self._arrow_dir = "up" if place_below else "down"
+
+        min_x = int(window_rect_global.x() + margin)
+        max_x = int(window_rect_global.x() + window_rect_global.width() - w - margin)
+        x = max(min_x, min(max_x, x))
+
+        # Arrow X relative to the popover.
+        self._arrow_x = int(anchor_global.x() - x)
+        self._arrow_x = max(self._radius + 18, min(w - self._radius - 18, self._arrow_x))
+
+        # Convert global placement to parent coords.
+        try:
+            parent = self.parentWidget()
+            local = parent.mapFromGlobal(QPoint(x, y)) if parent is not None else QPoint(x, y)
+        except Exception:
+            local = QPoint(x, y)
+
+        self.move(local)
+
+    def sizeHint(self) -> QSize:
+        return QSize(460, 220)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Card sits below/above arrow.
+        if self._arrow_dir == "up":
+            self._card.setGeometry(0, self._arrow_h, self.width(), self.height() - self._arrow_h)
+        else:
+            self._card.setGeometry(0, 0, self.width(), self.height() - self._arrow_h)
+
+    def paintEvent(self, event):
+        # Draw the arrow (the card itself is a child).
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(_BLUE))
+
+        ax = float(self._arrow_x)
+        aw = float(self._arrow_w)
+        ah = float(self._arrow_h)
+
+        if self._arrow_dir == "up":
+            y0 = 0.0
+            pts = [
+                QPoint(int(ax), int(y0)),
+                QPoint(int(ax - aw / 2), int(y0 + ah)),
+                QPoint(int(ax + aw / 2), int(y0 + ah)),
+            ]
+        else:
+            y0 = float(self.height())
+            pts = [
+                QPoint(int(ax), int(y0)),
+                QPoint(int(ax - aw / 2), int(y0 - ah)),
+                QPoint(int(ax + aw / 2), int(y0 - ah)),
+            ]
+
+        try:
+            p.drawPolygon(QPolygon(pts))
+        except Exception:
+            try:
+                p.drawPolygon(pts)
+            except Exception:
+                pass
+
+
+class _TutorialSpotlight(QWidget):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setVisible(False)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self._target_rect: QRect | None = None
+        self._target_widget: QWidget | None = None
+        self._target_widget_rect: QRect | None = None
+
+    def set_target_widget(self, w: QWidget | None) -> None:
+        self._target_widget = None
+        self._target_widget_rect = None
+
+        if w is None or not w.isVisible():
+            self._target_rect = None
+            self.update()
+            return
+        try:
+            tl = w.mapToGlobal(QPoint(0, 0))
+            br = w.mapToGlobal(QPoint(w.width(), w.height()))
+            parent = self.parentWidget()
+            if parent is not None:
+                tl = parent.mapFromGlobal(tl)
+                br = parent.mapFromGlobal(br)
+            r = QRect(tl, br)
+            self._target_widget = w
+            self._target_widget_rect = QRect(tl, br)
+            pad = 8
+            self._target_rect = r.adjusted(-pad, -pad, pad, pad)
+        except Exception:
+            self._target_rect = None
+            self._target_widget = None
+            self._target_widget_rect = None
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+
+        # Dim the whole window.
+        overlay = QColor(0, 0, 0, 150)
+        p.fillRect(self.rect(), overlay)
+
+        # Re-draw the target widget at full brightness on top of the dim.
+        tw = getattr(self, "_target_widget", None)
+        wr = getattr(self, "_target_widget_rect", None)
+        if tw is not None and wr is not None:
+            try:
+                pm = tw.grab()
+                # Clip the re-drawn widget to rounded corners so it doesn't "square off".
+                rr = 12.0
+                clip_r = QRectF(wr)
+                try:
+                    clip = QPainterPath()
+                    clip.addRoundedRect(clip_r, rr, rr)
+                    p.save()
+                    p.setClipPath(clip)
+                    p.drawPixmap(wr.topLeft(), pm)
+                    p.restore()
+                except Exception:
+                    p.drawPixmap(wr.topLeft(), pm)
+            except Exception:
+                pass
+
+        # Optional outline around the spotlight.
+        if self._target_rect is not None:
+            try:
+                cut = QRectF(self._target_rect)
+                rr = 12.0
+                pen = p.pen()
+                pen.setWidth(2)
+                pen.setColor(QColor(_BLUE))
+                p.setPen(pen)
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(cut, rr, rr)
+            except Exception:
+                pass
 _TILE_PX = 170
 _GRID_SPACING_PX = 18
 
@@ -166,22 +447,23 @@ class _NotificationRow(QFrame):
             "QFrame { background: #0f1216; border: none; border-radius: 12px; }"
         )
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(10, 8, 10, 8)
-        lay.setSpacing(10)
+        lay.setContentsMargins(10, 6, 10, 6)
+        lay.setSpacing(8)
 
         dot = QLabel("●")
-        dot.setFixedWidth(14)
+        dot.setFixedWidth(12)
+        dot.setStyleSheet("font-size: 12px;")
         if kind == "success":
-            dot.setStyleSheet(f"color: {_GREEN};")
+            dot.setStyleSheet(f"color: {_GREEN}; font-size: 12px;")
         elif kind == "error":
-            dot.setStyleSheet("color: #ff5a5f;")
+            dot.setStyleSheet("color: #ff5a5f; font-size: 12px;")
         else:
-            dot.setStyleSheet("color: #7f8793;")
+            dot.setStyleSheet("color: #7f8793; font-size: 12px;")
         lay.addWidget(dot, 0)
 
         lbl = QLabel(text)
         lbl.setWordWrap(True)
-        lbl.setStyleSheet("color: #e7eaf0;")
+        lbl.setStyleSheet("color: #e7eaf0; font-size: 13px;")
         lay.addWidget(lbl, 1)
 
 
@@ -237,6 +519,21 @@ class CardModel:
     progress: Optional[int] = None
     image_url: Optional[str] = None
     creator: Optional[str] = None
+    playlist_id: Optional[str] = None
+
+
+class _ClickableLabel(QLabel):
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        try:
+            if event.button() == Qt.LeftButton:
+                self.clicked.emit()
+                event.accept()
+                return
+        except Exception:
+            pass
+        super().mousePressEvent(event)
 
 
 class RoundedPixmapLabel(QLabel):
@@ -344,6 +641,7 @@ class PlaylistCard(QFrame):
         self._status_overlay: Optional[_StatusOverlay] = None
         self._raw_title: str = model.title
         self._raw_creator: str = model.creator or ""
+        self._playlist_id: str | None = model.playlist_id
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 14, 14, 14)
@@ -448,7 +746,7 @@ class PlaylistCard(QFrame):
             self._creator_label.setFixedHeight(0)
         panel_lay.addWidget(self._creator_label)
 
-        self._title_label = QLabel()
+        self._title_label = _ClickableLabel()
         ft = QFont()
         ft.setPointSize(13)
         ft.setBold(False)
@@ -459,6 +757,11 @@ class PlaylistCard(QFrame):
         self._title_label.setFixedHeight(22)
         self._title_label.setToolTip(self._raw_title)
         self._title_label.setToolTipDuration(8000)
+        try:
+            self._title_label.setCursor(Qt.PointingHandCursor)
+            self._title_label.clicked.connect(self._open_source)
+        except Exception:
+            pass
         panel_lay.addWidget(self._title_label)
 
         v.addWidget(panel, 0, Qt.AlignLeft | Qt.AlignBottom)
@@ -537,6 +840,7 @@ class PlaylistCard(QFrame):
 
         self._raw_title = model.title
         self._raw_creator = model.creator or ""
+        self._playlist_id = model.playlist_id
 
         # Keep status accessible via hover tooltip.
         try:
@@ -564,12 +868,39 @@ class PlaylistCard(QFrame):
         self._set_title_elided()
         self._set_creator_elided()
 
+    def _open_source(self) -> None:
+        pid = (getattr(self, "_playlist_id", None) or "").strip()
+        if not pid:
+            return
+        try:
+            QDesktopServices.openUrl(QUrl(f"https://open.spotify.com/playlist/{pid}"))
+        except Exception:
+            pass
+
     def mousePressEvent(self, event):
         if self._selection_enabled and event.button() == Qt.LeftButton:
+            shift = False
+            try:
+                shift = bool(event.modifiers() & Qt.ShiftModifier)
+            except Exception:
+                shift = False
+
+            if shift:
+                # Let the controller do range selection.
+                if self._on_toggle_selected is not None:
+                    try:
+                        # Pass current selected state so the controller can decide
+                        # whether the range should be selected or deselected.
+                        self._on_toggle_selected(self._selected, True)
+                    except Exception:
+                        pass
+                event.accept()
+                return
+
             self.set_selected(not self._selected)
             if self._on_toggle_selected is not None:
                 try:
-                    self._on_toggle_selected(self._selected)
+                    self._on_toggle_selected(self._selected, False)
                 except Exception:
                     pass
             event.accept()
@@ -1375,6 +1706,11 @@ class HomeWindow(QMainWindow):
         self._settings = QSettings("LightSync", "LightSync")
         self._db_load_retry_scheduled = False
 
+        # Tutorial/onboarding state (shown only when Help is clicked).
+        self._tutorial_completed = bool(self._settings.value("tutorial_completed", False) or False)
+        self._tutorial_active = False
+        self._tutorial_step = 0
+
         # If DOWNLOAD_ROOT isn't set in the environment, fall back to saved setting.
         try:
             if not (os.getenv("DOWNLOAD_ROOT") or "").strip():
@@ -1441,6 +1777,16 @@ class HomeWindow(QMainWindow):
         )
         self.btn_notifications.clicked.connect(self._toggle_notifications)
         top.addWidget(self.btn_notifications)
+
+        self.btn_help = QToolButton()
+        self.btn_help.setIcon(_svg_icon("help.svg", _TOPBAR_ICON_PX))
+        self.btn_help.setIconSize(QSize(_TOPBAR_ICON_PX, _TOPBAR_ICON_PX))
+        self.btn_help.setStyleSheet(
+            "QToolButton { background: transparent; padding: 4px 6px; }"
+            "QToolButton:hover { background: rgba(255,255,255,0.06); border-radius: 8px; }"
+        )
+        self.btn_help.clicked.connect(self._toggle_tutorial)
+        top.addWidget(self.btn_help)
 
         self.btn_settings = QToolButton()
         self.btn_settings.setIcon(_svg_icon("settings.svg", _TOPBAR_ICON_PX))
@@ -1854,6 +2200,26 @@ class HomeWindow(QMainWindow):
             "QPushButton { background: #e7eaf0; color: #111; border: none; border-radius: 10px; padding: 0 10px; font-weight: 800; }"
             "QPushButton:disabled { background: #2b2f36; color: #7f8793; }"
         )
+
+        # Placeholder: Spotify sign-in UI is currently hard-coded; real auth wiring comes next.
+        self.spotify_login = QPushButton("Sign in")
+        self.spotify_login.setFixedHeight(28)
+        self.spotify_login.setStyleSheet(
+            "QPushButton { background: transparent; color: #e7eaf0; border: 1px solid #2b2f36; border-radius: 10px; padding: 0 10px; font-weight: 800; }"
+            "QPushButton:hover { border-color: #3b414b; }"
+        )
+
+        def _spotify_login_stub():
+            QMessageBox.information(
+                self,
+                "Spotify",
+                "Spotify sign-in from the UI is coming next.\n\n"
+                "For now: you can still add playlists via URL in ‘Add Playlists’.",
+            )
+
+        self.spotify_login.clicked.connect(_spotify_login_stub)
+
+        sp_top.addWidget(self.spotify_login)
         sp_top.addWidget(self.spotify_logout)
         sp_lay.addLayout(sp_top)
 
@@ -1897,6 +2263,7 @@ class HomeWindow(QMainWindow):
         self._downloads_timer.timeout.connect(self._maybe_refresh_downloads)
 
         self._selected_playlist_ids: set[str] = set()
+        self._selection_anchor_pid: str | None = None
 
         # Parsed run stats
         self._playlists_total: Optional[int] = None
@@ -1976,6 +2343,14 @@ class HomeWindow(QMainWindow):
         except Exception:
             pass
 
+        # Tutorial popover UI.
+        self._spotlight = _TutorialSpotlight(self)
+        self._spotlight.setGeometry(0, 0, self.width(), self.height())
+        self._tip = _TipPopover(self)
+        self._tip.closed.connect(self._tutorial_close)
+        self._tip.hide_clicked.connect(self._tutorial_hide_forever)
+        self._tip.next_clicked.connect(self._tutorial_next)
+
         self._load_cards_from_db()
 
     def showEvent(self, event):
@@ -2026,6 +2401,15 @@ class HomeWindow(QMainWindow):
         super().resizeEvent(event)
         # Reflow tiles when width changes.
         self._reflow_library_grid()
+        try:
+            self._spotlight.setGeometry(0, 0, self.width(), self.height())
+        except Exception:
+            pass
+        if getattr(self, "_tutorial_active", False):
+            try:
+                self._tutorial_refresh()
+            except Exception:
+                pass
 
     def _show_library_page(self) -> None:
         self.page_title.setText("Synced Library")
@@ -2033,6 +2417,15 @@ class HomeWindow(QMainWindow):
         self._reflow_library_grid()
         if self.notifications_panel.isVisible():
             self.notifications_panel.setVisible(False)
+        if self._tutorial_active:
+            # If the user navigated Home while we were on the Spotify tip,
+            # treat that as "continue" to the Sync step.
+            try:
+                if int(getattr(self, "_tutorial_step", 0) or 0) == 2:
+                    self._tutorial_step = 3
+            except Exception:
+                pass
+            self._tutorial_refresh()
 
     def _show_settings_page(self) -> None:
         self.page_title.setText("Settings")
@@ -2040,6 +2433,15 @@ class HomeWindow(QMainWindow):
         self._refresh_settings()
         if self.notifications_panel.isVisible():
             self.notifications_panel.setVisible(False)
+        if self._tutorial_active:
+            # If the user clicked Settings directly from the welcome step,
+            # advance to the Download Root step.
+            try:
+                if int(getattr(self, "_tutorial_step", 0) or 0) == 0:
+                    self._tutorial_step = 1
+            except Exception:
+                pass
+            self._tutorial_refresh()
 
     def _toggle_notifications(self) -> None:
         if self.notifications_panel.isVisible():
@@ -2345,6 +2747,8 @@ class HomeWindow(QMainWindow):
         except Exception:
             return
         self._refresh_storage_stats()
+        if self._tutorial_active:
+            self._tutorial_refresh()
 
     def _refresh_storage_stats(self) -> None:
         from pathlib import Path
@@ -2609,13 +3013,13 @@ class HomeWindow(QMainWindow):
             status = p.get("status") or "Synced"
             creator = p.get("creator")
 
-            model = CardModel(title=name, status=status, creator=creator, image_url=image_url)
+            model = CardModel(title=name, status=status, creator=creator, image_url=image_url, playlist_id=pid)
 
             card = self._cards_by_pid.get(pid)
             if card is None:
                 card = PlaylistCard(
                     model,
-                    on_toggle_selected=(lambda selected, pid=pid: self._on_playlist_selected(pid, selected)),
+                    on_toggle_selected=(lambda selected, shift=False, pid=pid: self._on_playlist_selected(pid, selected, shift)),
                 )
                 self._cards_by_pid[pid] = card
             else:
@@ -2664,11 +3068,58 @@ class HomeWindow(QMainWindow):
     def _open_add_playlists(self) -> None:
         self._show_add_page()
 
-    def _on_playlist_selected(self, pid: str, selected: bool) -> None:
+    def _on_playlist_selected(self, pid: str, selected: bool, shift: bool = False) -> None:
+        # Shift-click selects a contiguous range from the anchor to pid.
+        if shift:
+            ordered_ids = [
+                p.get("id")
+                for p in (getattr(self, "_last_rendered_playlists", []) or [])
+                if p.get("id")
+            ]
+            ordered_ids = [x for x in ordered_ids if isinstance(x, str) and x]
+
+            # If the clicked card is currently selected, shift-click deselects the range.
+            deselect_mode = bool(selected)
+
+            anchor = getattr(self, "_selection_anchor_pid", None)
+            if not anchor:
+                # Fall back to any existing selection (or current click).
+                anchor = next(iter(self._selected_playlist_ids), pid)
+                self._selection_anchor_pid = anchor
+
+            if anchor in ordered_ids and pid in ordered_ids:
+                a = ordered_ids.index(anchor)
+                b = ordered_ids.index(pid)
+                lo, hi = (a, b) if a <= b else (b, a)
+                for x in ordered_ids[lo : hi + 1]:
+                    card = self._cards_by_pid.get(x)
+                    if deselect_mode:
+                        self._selected_playlist_ids.discard(x)
+                        if card is not None:
+                            card.set_selected(False)
+                    else:
+                        self._selected_playlist_ids.add(x)
+                        if card is not None:
+                            card.set_selected(True)
+            else:
+                # Fallback behavior: just select this one.
+                if deselect_mode:
+                    self._selected_playlist_ids.discard(pid)
+                else:
+                    self._selected_playlist_ids.add(pid)
+                card = self._cards_by_pid.get(pid)
+                if card is not None:
+                    card.set_selected(not deselect_mode)
+
+            self._update_remove_button()
+            return
+
         if selected:
             self._selected_playlist_ids.add(pid)
         else:
             self._selected_playlist_ids.discard(pid)
+        # Update the range anchor on normal clicks.
+        self._selection_anchor_pid = pid
         self._update_remove_button()
 
     def _update_remove_button(self) -> None:
@@ -2751,6 +3202,7 @@ class HomeWindow(QMainWindow):
             note = f"Sync enabled for {len(ids)} playlist(s)"
 
         self._selected_playlist_ids.clear()
+        self._selection_anchor_pid = None
         self._toggle_sync_mode = None
         self._update_remove_button()
         self._load_cards_from_db()
@@ -2830,6 +3282,7 @@ class HomeWindow(QMainWindow):
             pass
 
         self._selected_playlist_ids.clear()
+        self._selection_anchor_pid = None
         self._update_remove_button()
         self._load_cards_from_db()
 
@@ -2886,6 +3339,11 @@ class HomeWindow(QMainWindow):
         # Run existing main.py in the background so we reuse the current pipeline.
         if self._sync_proc is not None and self._sync_proc.state() != QProcess.NotRunning:
             return
+
+        if self._tutorial_active and self._tutorial_step <= 4:
+            # Jump to the "sync started" step.
+            self._tutorial_step = 5
+            QTimer.singleShot(150, self._tutorial_refresh)
 
         self.sync_now.setEnabled(False)
         self.sync_now.setText("SYNCING…")
@@ -2965,6 +3423,234 @@ class HomeWindow(QMainWindow):
         if not self._downloads_timer.isActive():
             self._downloads_timer.start()
         proc.start()
+
+
+    def _toggle_tutorial(self) -> None:
+        if getattr(self, "_tutorial_active", False) and self._tip.isVisible():
+            self._tutorial_close()
+            return
+
+        if getattr(self, "_tutorial_completed", False):
+            # Allow help to re-run tips even if previously hidden/completed.
+            self._tutorial_completed = False
+            try:
+                self._settings.setValue("tutorial_completed", False)
+            except Exception:
+                pass
+
+        self._tutorial_active = True
+        self._tutorial_step = 0
+        self._tutorial_refresh()
+
+    def _tutorial_close(self) -> None:
+        self._tutorial_active = False
+        try:
+            self._tip.setVisible(False)
+        except Exception:
+            pass
+        try:
+            self._spotlight.setVisible(False)
+            self._spotlight.set_target_widget(None)
+        except Exception:
+            pass
+
+    def _tutorial_hide_forever(self) -> None:
+        self._tutorial_completed = True
+        try:
+            self._settings.setValue("tutorial_completed", True)
+        except Exception:
+            pass
+        self._tutorial_close()
+
+    def _tutorial_next(self) -> None:
+        if not getattr(self, "_tutorial_active", False):
+            return
+        s = int(getattr(self, "_tutorial_step", 0) or 0)
+        # Step transitions also drive navigation so tips always make sense.
+        if s == 0:
+            self._tutorial_step = 1
+            self._show_settings_page()
+            return
+        if s == 1:
+            root = (os.getenv("DOWNLOAD_ROOT") or "").strip()
+            if not root:
+                # Stay on this step until user actually chooses a folder.
+                self._tutorial_refresh()
+                return
+            self._tutorial_step = 2
+            self._tutorial_refresh()
+            return
+        if s == 2:
+            self._tutorial_step = 3
+            self._show_library_page()
+            return
+        if s == 3:
+            self._tutorial_step = 4
+            self._tutorial_refresh()
+            return
+        if s == 4:
+            running = False
+            try:
+                running = self._sync_proc is not None and self._sync_proc.state() != QProcess.NotRunning
+            except Exception:
+                running = False
+            if not running:
+                # User hasn't started sync yet; keep them here.
+                self._tutorial_refresh()
+                return
+            self._tutorial_step = 5
+            self._tutorial_refresh()
+            return
+        # Final
+        self._tutorial_hide_forever()
+
+    def _tutorial_refresh(self) -> None:
+        if not getattr(self, "_tutorial_active", False):
+            return
+
+        # Don’t show if user hid them.
+        if getattr(self, "_tutorial_completed", False):
+            return
+
+        s = int(getattr(self, "_tutorial_step", 0) or 0)
+
+        # Helper to show the popover anchored to a widget.
+        def show_for(w: QWidget | None, *, title: str, body: str, next_text: str = "Next") -> None:
+            if w is None or not w.isVisible():
+                return
+            # Show spotlight overlay and aim it at the target.
+            try:
+                self._spotlight.setVisible(True)
+                self._spotlight.raise_()
+                self._spotlight.set_target_widget(w)
+            except Exception:
+                pass
+
+            # Enable/disable Next for gated steps.
+            next_enabled = True
+            if getattr(self, "_tutorial_step", 0) == 1:
+                next_enabled = bool((os.getenv("DOWNLOAD_ROOT") or "").strip())
+            if getattr(self, "_tutorial_step", 0) == 4:
+                try:
+                    next_enabled = self._sync_proc is not None and self._sync_proc.state() != QProcess.NotRunning
+                except Exception:
+                    next_enabled = False
+
+            self._tip.set_content(title=title, body=body, next_text=next_text, next_enabled=next_enabled)
+            self._tip.resize(self._tip.sizeHint())
+
+            try:
+                center = w.mapToGlobal(QPoint(int(w.width() / 2), int(w.height())))
+            except Exception:
+                center = self.mapToGlobal(QPoint(int(self.width() / 2), 0))
+
+            try:
+                tl = self.mapToGlobal(QPoint(0, 0))
+                wr = QRectF(tl.x(), tl.y(), float(self.width()), float(self.height()))
+            except Exception:
+                wr = None
+
+            self._tip.set_anchor(anchor_global=center, prefer_below=True, window_rect_global=wr)
+            self._tip.raise_()
+            self._tip.setVisible(True)
+
+        # Step 0: Home -> Settings
+        if s == 0:
+            show_for(
+                self.btn_settings,
+                title="Welcome",
+                body="Open Settings to choose where your downloads and Rekordbox XML will live.",
+                next_text="Go to Settings",
+            )
+            return
+
+        # Step 1: Settings -> Download root
+        if s == 1:
+            if self.stack.currentWidget() is not self.settings_page:
+                self._show_settings_page()
+                return
+            root = (os.getenv("DOWNLOAD_ROOT") or "").strip()
+            note = ""
+            if not root:
+                note = "\n\nPick a folder first, then click Next."
+            show_for(
+                self.browse_btn,
+                title="Set your Download Root",
+                body="This is where songs download, and where the Rekordbox XML export will go." + note,
+            )
+            return
+
+        # Step 2: Settings -> Spotify optional
+        if s == 2:
+            if self.stack.currentWidget() is not self.settings_page:
+                self._show_settings_page()
+                return
+            show_for(
+                getattr(self, "spotify_login", None),
+                title="Optional",
+                body="Connect Spotify to quickly add playlists. Or skip and add playlists via URL.",
+                next_text="Back to Home",
+            )
+            return
+
+        # Step 3: Home -> Select playlists / Freeze
+        if s == 3:
+            if self.stack.currentWidget() is not self.library_page:
+                self._show_library_page()
+                return
+
+            # Aim at a real playlist card if possible; otherwise aim at the Add tile.
+            target: QWidget | None = None
+            try:
+                ordered_ids = [p.get("id") for p in (getattr(self, "_last_rendered_playlists", []) or []) if p.get("id")]
+                ordered_ids = [x for x in ordered_ids if isinstance(x, str) and x]
+                if ordered_ids:
+                    target = self._cards_by_pid.get(ordered_ids[0])
+            except Exception:
+                target = None
+
+            if target is None:
+                target = getattr(self, "_add_tile", None)
+
+            if target is None:
+                self._tutorial_step = 4
+                self._tutorial_refresh()
+                return
+
+            show_for(
+                target,
+                title="Freeze playlists",
+                body="Click playlists to select them. Use ‘Disable Sync’ to freeze them (they stay in your library, but future syncs won’t update them).\n\nTip: Shift-click selects a range (and shift-click a selected item to deselect a range).",
+                next_text="Next",
+            )
+            return
+
+        # Step 4: Home -> Sync
+        if s == 4:
+            if self.stack.currentWidget() is not self.library_page:
+                self._show_library_page()
+                return
+            note = "\n\nOnce sync is running, click Next."
+            show_for(
+                self.sync_now,
+                title="Start your first sync",
+                body="Click SYNC NOW to download missing songs and update the Rekordbox XML." + note,
+                next_text="Next",
+            )
+            return
+
+        # Step 5: Sync started -> Details
+        if s == 5:
+            if self.stack.currentWidget() is not self.library_page:
+                self._show_library_page()
+                return
+            show_for(
+                self.details_btn,
+                title="Sync started",
+                body="Use Details to watch progress. Songs will download and the Rekordbox XML will be updated.",
+                next_text="Done",
+            )
+            return
 
     def _toggle_details(self, on: bool) -> None:
         self.details_btn.setText("Details ▴" if on else "Details ▾")
