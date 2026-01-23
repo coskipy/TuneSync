@@ -4,11 +4,15 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 from time import sleep
 import threading
+import json
+import os
+import subprocess
 
 from dotenv import load_dotenv
 import spotipy
-from spotipy.oauth2 import SpotifyOAuth
+from spotipy.oauth2 import SpotifyPKCE
 from spotipy.exceptions import SpotifyException
+from spotipy.cache_handler import CacheHandler, CacheFileHandler
 
 
 @dataclass
@@ -21,16 +25,61 @@ class SpotifyClient:
     cache = _Cache(artist_genres={})
     _request_lock = threading.Lock()  # Rate limit protection
     _min_request_delay = 0.1  # Minimum seconds between requests (10 req/sec)
+    _auth_open_browser: Optional[bool] = None
+    _auth_scope: Optional[str] = None
+
+    _KC_SERVICE = "LightSync Spotify Token"
+    _KC_ACCOUNT = "default"
 
     @classmethod
     def login(cls, scope: str = "playlist-read-private", silent: bool = False) -> spotipy.Spotify:
-        if cls.sp is None:
-            load_dotenv()
-            cls.sp = spotipy.Spotify(auth_manager=SpotifyOAuth(scope=scope))
-            if not silent:
-                me = cls.sp.current_user()
-                print("✅ Logged in as:", me.get("display_name") or me.get("id"), flush=True)
+        load_dotenv()
+        client_id = (os.getenv("SPOTIPY_CLIENT_ID") or "").strip() or None
+        redirect_uri = (os.getenv("SPOTIPY_REDIRECT_URI") or "").strip() or None
+
+        # In the GUI, we want to avoid unexpectedly popping a browser during background actions.
+        open_browser = not bool(silent)
+
+        if cls.sp is None or cls._auth_open_browser != open_browser or cls._auth_scope != scope:
+            cache_handler = _make_cache_handler()
+            auth = SpotifyPKCE(
+                client_id=client_id,
+                redirect_uri=redirect_uri,
+                scope=scope,
+                open_browser=open_browser,
+                cache_handler=cache_handler,
+            )
+            cls.sp = spotipy.Spotify(auth_manager=auth)
+            cls._auth_open_browser = open_browser
+            cls._auth_scope = scope
+
+        if not silent:
+            me = cls.sp.current_user()
+            print("✅ Logged in as:", me.get("display_name") or me.get("id"), flush=True)
+
         return cls.sp
+
+    @classmethod
+    def has_cached_token(cls) -> bool:
+        try:
+            load_dotenv()
+            handler = _make_cache_handler()
+            token = handler.get_cached_token()
+            return bool(token and isinstance(token, dict))
+        except Exception:
+            return False
+
+    @classmethod
+    def logout(cls) -> None:
+        try:
+            handler = _make_cache_handler()
+            if hasattr(handler, "delete"):
+                handler.delete()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        cls.sp = None
+        cls._auth_open_browser = None
+        cls._auth_scope = None
 
     # ------------------------
     # Internal helpers
@@ -66,6 +115,15 @@ class SpotifyClient:
             for p in results["items"]:
                 owner = p.get("owner") or {}
                 creator = owner.get("display_name") or owner.get("id")
+                owner_id = owner.get("id")
+                public_raw = p.get("public")
+                spotify_is_public: Optional[int]
+                if public_raw is True:
+                    spotify_is_public = 1
+                elif public_raw is False:
+                    spotify_is_public = 0
+                else:
+                    spotify_is_public = None
                 images = p.get("images") or []
                 cover_url = None
                 if images:
@@ -74,6 +132,8 @@ class SpotifyClient:
                     "id": p["id"],
                     "name": p["name"],
                     "creator": creator,
+                    "spotify_owner_id": owner_id,
+                    "spotify_is_public": spotify_is_public,
                     "snapshot_id": p.get("snapshot_id"),
                     "image_url": cover_url,
                 })
@@ -81,33 +141,66 @@ class SpotifyClient:
         return playlists
 
     @classmethod
-    def get_playlist_metadata(cls, playlist_id: str) -> Dict:
-        sp = cls.login()
-        p = cls._retry(sp.playlist, playlist_id, fields="id,name,snapshot_id,images,owner(display_name,id)")
+    def get_current_user(cls) -> Dict:
+        """Return the signed-in user's profile (requires a cached token)."""
+        sp = cls.login(silent=True)
+        return cls._retry(sp.current_user)
+
+    @classmethod
+    def get_current_user(cls) -> Dict:
+        """Return the signed-in user's profile (requires a cached token)."""
+        sp = cls.login(silent=True)
+        return cls._retry(sp.current_user)
+
+    @classmethod
+    def get_playlist_metadata(cls, playlist_id: str, *, silent: bool = False) -> Dict:
+        sp = cls.login(silent=silent)
+        p = cls._retry(
+            sp.playlist,
+            playlist_id,
+            fields="id,name,snapshot_id,public,images,owner(display_name,id)",
+        )
         owner = p.get("owner") or {}
         creator = owner.get("display_name") or owner.get("id")
+        owner_id = owner.get("id")
+        public_raw = p.get("public")
+        spotify_is_public: Optional[int]
+        if public_raw is True:
+            spotify_is_public = 1
+        elif public_raw is False:
+            spotify_is_public = 0
+        else:
+            spotify_is_public = None
         images = p.get("images") or []
         cover_url = None
         if images:
             cover_url = sorted(images, key=lambda x: (x.get("width") or 0), reverse=True)[0].get("url")
-        return {"id": p["id"], "name": p["name"], "creator": creator, "snapshot_id": p.get("snapshot_id"), "image_url": cover_url}
+        return {
+            "id": p["id"],
+            "name": p["name"],
+            "creator": creator,
+            "spotify_owner_id": owner_id,
+            "spotify_is_public": spotify_is_public,
+            "snapshot_id": p.get("snapshot_id"),
+            "image_url": cover_url,
+        }
 
     @classmethod
     def get_playlists_metadata_batch(cls, playlist_ids: List[str]) -> Dict[str, Dict]:
         """
         Get metadata for multiple playlists efficiently.
         Returns {playlist_id: {id, name, snapshot_id}}
-        
+
         Strategy: First try to get them all from get_my_playlists() (1 API call),
         then individually fetch any that weren't in that list (e.g., followed playlists).
         """
         if not playlist_ids:
             return {}
-        
+
         # First, get all user playlists in one go (handles most cases)
         my_playlists = cls.get_my_playlists()
         result = {p["id"]: p for p in my_playlists if p["id"] in playlist_ids}
-        
+
         # Fetch any missing ones individually (e.g., followed playlists not owned by user)
         missing_ids = set(playlist_ids) - result.keys()
         for pid in missing_ids:
@@ -115,7 +208,7 @@ class SpotifyClient:
                 result[pid] = cls.get_playlist_metadata(pid)
             except Exception as e:
                 print(f"  ⚠️  Failed to fetch playlist {pid}: {e}")
-        
+
         return result
 
     @classmethod
@@ -153,7 +246,7 @@ class SpotifyClient:
                     "added_at": item.get("added_at"),
                 })
             results = cls._retry(sp.next, results) if results.get("next") else None
-            if results and not results.get("items"):  # defensive
+            if results and not results.get("items"):
                 break
         return tracks
 
@@ -216,13 +309,7 @@ class SpotifyClient:
 
     @classmethod
     def get_tracks_details(cls, track_ids: List[str]) -> List[Dict]:
-        """
-        Batch variant of ``get_track_details``.
-
-        Retrieves metadata for multiple tracks, fetching primary artist genres in
-        batches and updating the in-memory cache. Returns a list of metadata
-        dictionaries with the same structure as ``get_track_details``.
-        """
+        """Batch variant of ``get_track_details``."""
         if not track_ids:
             return []
 
@@ -270,3 +357,94 @@ class SpotifyClient:
             metas.append(cls._build_meta(tr, genres))
 
         return metas
+
+
+class _KeychainCacheHandler(CacheHandler):
+    def __init__(self, *, service: str, account: str):
+        self._service = service
+        self._account = account
+
+    def get_cached_token(self):
+        try:
+            p = subprocess.run(
+                [
+                    "/usr/bin/security",
+                    "find-generic-password",
+                    "-a",
+                    self._account,
+                    "-s",
+                    self._service,
+                    "-w",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if p.returncode != 0:
+                return None
+            raw = (p.stdout or "").strip()
+            if not raw:
+                return None
+            token_info = json.loads(raw)
+            return token_info if isinstance(token_info, dict) else None
+        except Exception:
+            return None
+
+    def save_token_to_cache(self, token_info):
+        try:
+            raw = json.dumps(token_info or {}, separators=(",", ":"))
+            subprocess.run(
+                [
+                    "/usr/bin/security",
+                    "add-generic-password",
+                    "-a",
+                    self._account,
+                    "-s",
+                    self._service,
+                    "-w",
+                    raw,
+                    "-U",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            pass
+
+    def delete(self) -> None:
+        try:
+            subprocess.run(
+                [
+                    "/usr/bin/security",
+                    "delete-generic-password",
+                    "-a",
+                    self._account,
+                    "-s",
+                    self._service,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            pass
+
+
+def _make_cache_handler() -> CacheHandler:
+    # Prefer macOS Keychain (no extra Python deps). Fallback to a local cache file.
+    try:
+        if os.name == "posix" and os.path.exists("/usr/bin/security"):
+            return _KeychainCacheHandler(service=SpotifyClient._KC_SERVICE, account=SpotifyClient._KC_ACCOUNT)
+    except Exception:
+        pass
+
+    try:
+        from pathlib import Path
+
+        cache_dir = Path.home() / "Library" / "Application Support" / "LightSync"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / "spotify_token.json"
+        return CacheFileHandler(cache_path=str(cache_path))
+    except Exception:
+        return CacheFileHandler(cache_path=".spotify_token.json")

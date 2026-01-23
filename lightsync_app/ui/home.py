@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Optional
 import re
 import os
+import json
+import time
 
 from PySide6.QtCore import Qt, QUrl, QSize, QRect, QRectF, QObject, Signal, QThread, QTimer, QPoint, QEvent, QSettings
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPixmap, QFontMetrics, QIcon, QAction, QActionGroup, QPolygon
@@ -12,6 +14,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QAbstractButton,
     QFrame,
     QGraphicsDropShadowEffect,
     QGridLayout,
@@ -124,7 +127,6 @@ _CONTROL_ICON_PX = 22
 class _TipPopover(QFrame):
     closed = Signal()
     next_clicked = Signal()
-    hide_clicked = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -165,9 +167,10 @@ class _TipPopover(QFrame):
 
         self._close = QToolButton()
         self._close.setText("✕")
+        self._close.setFixedSize(42, 42)
         self._close.setStyleSheet(
-            "QToolButton { background: rgba(255,255,255,0.18); color: white; border: none; border-radius: 12px; padding: 4px 8px; }"
-            "QToolButton:hover { background: rgba(255,255,255,0.26); }"
+            "QToolButton { background: transparent; color: white; border: none; font-weight: 900; font-size: 30px; }"
+            "QToolButton:hover { color: rgba(255,255,255,0.88); }"
         )
         self._close.clicked.connect(self._on_close)
         top.addWidget(self._close, 0, Qt.AlignTop)
@@ -181,15 +184,6 @@ class _TipPopover(QFrame):
         bottom = QHBoxLayout()
         bottom.setContentsMargins(0, 0, 0, 0)
         bottom.setSpacing(10)
-
-        self._hide = QToolButton()
-        self._hide.setText("Hide these tips")
-        self._hide.setStyleSheet(
-            "QToolButton { background: transparent; color: rgba(255,255,255,0.85); border: none; text-decoration: underline; }"
-            "QToolButton:hover { color: white; }"
-        )
-        self._hide.clicked.connect(lambda: self.hide_clicked.emit())
-        bottom.addWidget(self._hide, 0, Qt.AlignLeft)
         bottom.addStretch(1)
 
         self._next = QPushButton("Next")
@@ -440,10 +434,23 @@ def _svg_icon(name: str, size: int = 18) -> QIcon:
         return QIcon()
 
 
+def _apply_pointer_cursor(root: QWidget) -> None:
+    """Make clickable controls feel consistent (pointer cursor)."""
+    try:
+        for btn in root.findChildren(QAbstractButton):
+            try:
+                btn.setCursor(Qt.PointingHandCursor)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 class _NotificationRow(QFrame):
-    def __init__(self, text: str, *, kind: str = "info"):
+    def __init__(self, text: str, *, kind: str = "info", on_close=None):
         super().__init__()
         self._raw_text = text
+        self._on_close = on_close
         self.setStyleSheet(
             "QFrame { background: #0f1216; border: none; border-radius: 12px; }"
         )
@@ -474,6 +481,17 @@ class _NotificationRow(QFrame):
         self._lbl.setFixedHeight(18)
         lay.addWidget(self._lbl, 1)
 
+        close_btn = QToolButton()
+        close_btn.setText("×")
+        close_btn.setFixedSize(20, 20)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet(
+            "QToolButton { background: transparent; color: #a9b0bb; border: none; font-weight: 900; }"
+            "QToolButton:hover { color: #e7eaf0; }"
+        )
+        close_btn.clicked.connect(self._handle_close)
+        lay.addWidget(close_btn, 0, Qt.AlignRight)
+
         self._set_elided()
 
     def _set_elided(self) -> None:
@@ -491,6 +509,13 @@ class _NotificationRow(QFrame):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._set_elided()
+
+    def _handle_close(self) -> None:
+        try:
+            if callable(self._on_close):
+                self._on_close()
+        except Exception:
+            pass
 
 
 class _StorageBar(QFrame):
@@ -1009,6 +1034,26 @@ class _SpotifyPlaylistsWorker(QObject):
             self.failed.emit(str(e))
 
 
+class _SpotifyAuthWorker(QObject):
+    done = Signal(str)  # display name/id
+    failed = Signal(str)
+
+    def __init__(self, *, scope: str):
+        super().__init__()
+        self._scope = scope
+
+    def run(self):
+        try:
+            from spotify_client import SpotifyClient
+
+            sp = SpotifyClient.login(scope=self._scope, silent=False)
+            me = sp.current_user() or {}
+            who = (me.get("display_name") or me.get("id") or "Spotify")
+            self.done.emit(str(who))
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 class _LocateTrackWorker(QObject):
     done = Signal(str)  # track_id
     failed = Signal(str, str)  # track_id, msg
@@ -1492,6 +1537,32 @@ class AddPlaylistsPage(QWidget):
         self.search.setText("")
         self.loading.setVisible(True)
         self.loading.setText("Loading your playlists…")
+
+        # Avoid surprising browser popups: only load Spotify playlists if already authed.
+        authed = False
+        try:
+            from spotify_client import SpotifyClient
+
+            authed = SpotifyClient.has_cached_token()
+        except Exception:
+            authed = False
+
+        if not authed:
+            try:
+                self._all = []
+                self._filtered = []
+                self._ordered_pids = []
+                self._selected = set()
+                self._selection_anchor_pid = None
+                self._clear_grid()
+            except Exception:
+                pass
+            self.loading.setText(
+                "Sign in to Spotify in Settings to load your playlists.\n\n"
+                "You can still add a playlist via URL below."
+            )
+            return
+
         self._start_load()
 
     def _start_load(self) -> None:
@@ -1727,7 +1798,7 @@ class AddPlaylistsPage(QWidget):
             try:
                 from spotify_client import SpotifyClient
 
-                meta = SpotifyClient.get_playlist_metadata(url_pid)
+                meta = SpotifyClient.get_playlist_metadata(url_pid, silent=True)
                 name = meta.get("name") or name
                 creator = meta.get("creator")
                 image_url = meta.get("image_url")
@@ -1829,13 +1900,18 @@ class HomeWindow(QMainWindow):
         self.btn_home = QToolButton()
         self.btn_home.setIcon(_svg_icon("home.svg", _TOPBAR_ICON_PX))
         self.btn_home.setIconSize(QSize(_TOPBAR_ICON_PX, _TOPBAR_ICON_PX))
+        self.btn_home.setFixedSize(QSize(44, 44))
+        self.btn_home.setAutoRaise(True)
         self.btn_home.setStyleSheet(
             "QToolButton {"
             "color: #d7dbe3;"
             "background: transparent;"
+            "border: none;"
+            "margin: 0px;"
             "padding: 4px 6px;"
             "}"
             "QToolButton:hover { background: rgba(255,255,255,0.06); border-radius: 8px; }"
+            "QToolButton:pressed { background: rgba(255,255,255,0.06); border-radius: 8px; padding: 4px 6px; }"
         )
         self.btn_home.clicked.connect(self._show_library_page)
         top.addWidget(self.btn_home)
@@ -1843,9 +1919,12 @@ class HomeWindow(QMainWindow):
         self.btn_missing = QToolButton()
         self.btn_missing.setIcon(_svg_icon("missing.svg", _TOPBAR_ICON_PX))
         self.btn_missing.setIconSize(QSize(_TOPBAR_ICON_PX, _TOPBAR_ICON_PX))
+        self.btn_missing.setFixedSize(QSize(44, 44))
+        self.btn_missing.setAutoRaise(True)
         self.btn_missing.setStyleSheet(
-            "QToolButton { background: transparent; padding: 4px 6px; }"
+            "QToolButton { background: transparent; border: none; margin: 0px; padding: 4px 6px; }"
             "QToolButton:hover { background: rgba(255,255,255,0.06); border-radius: 8px; }"
+            "QToolButton:pressed { background: rgba(255,255,255,0.06); border-radius: 8px; padding: 4px 6px; }"
         )
         self.btn_missing.clicked.connect(self._toggle_missing)
         top.addWidget(self.btn_missing)
@@ -1853,9 +1932,12 @@ class HomeWindow(QMainWindow):
         self.btn_notifications = QToolButton()
         self.btn_notifications.setIcon(_svg_icon("notifications.svg", _TOPBAR_ICON_PX))
         self.btn_notifications.setIconSize(QSize(_TOPBAR_ICON_PX, _TOPBAR_ICON_PX))
+        self.btn_notifications.setFixedSize(QSize(44, 44))
+        self.btn_notifications.setAutoRaise(True)
         self.btn_notifications.setStyleSheet(
-            "QToolButton { background: transparent; padding: 4px 6px; }"
+            "QToolButton { background: transparent; border: none; margin: 0px; padding: 4px 6px; }"
             "QToolButton:hover { background: rgba(255,255,255,0.06); border-radius: 8px; }"
+            "QToolButton:pressed { background: rgba(255,255,255,0.06); border-radius: 8px; padding: 4px 6px; }"
         )
         self.btn_notifications.clicked.connect(self._toggle_notifications)
         top.addWidget(self.btn_notifications)
@@ -1863,9 +1945,12 @@ class HomeWindow(QMainWindow):
         self.btn_help = QToolButton()
         self.btn_help.setIcon(_svg_icon("help.svg", _TOPBAR_ICON_PX))
         self.btn_help.setIconSize(QSize(_TOPBAR_ICON_PX, _TOPBAR_ICON_PX))
+        self.btn_help.setFixedSize(QSize(44, 44))
+        self.btn_help.setAutoRaise(True)
         self.btn_help.setStyleSheet(
-            "QToolButton { background: transparent; padding: 4px 6px; }"
+            "QToolButton { background: transparent; border: none; margin: 0px; padding: 4px 6px; }"
             "QToolButton:hover { background: rgba(255,255,255,0.06); border-radius: 8px; }"
+            "QToolButton:pressed { background: rgba(255,255,255,0.06); border-radius: 8px; padding: 4px 6px; }"
         )
         self.btn_help.clicked.connect(self._toggle_tutorial)
         top.addWidget(self.btn_help)
@@ -1873,9 +1958,12 @@ class HomeWindow(QMainWindow):
         self.btn_settings = QToolButton()
         self.btn_settings.setIcon(_svg_icon("settings.svg", _TOPBAR_ICON_PX))
         self.btn_settings.setIconSize(QSize(_TOPBAR_ICON_PX, _TOPBAR_ICON_PX))
+        self.btn_settings.setFixedSize(QSize(44, 44))
+        self.btn_settings.setAutoRaise(True)
         self.btn_settings.setStyleSheet(
-            "QToolButton { background: transparent; padding: 4px 6px; }"
+            "QToolButton { background: transparent; border: none; margin: 0px; padding: 4px 6px; }"
             "QToolButton:hover { background: rgba(255,255,255,0.06); border-radius: 8px; }"
+            "QToolButton:pressed { background: rgba(255,255,255,0.06); border-radius: 8px; padding: 4px 6px; }"
         )
         self.btn_settings.clicked.connect(self._show_settings_page)
         top.addWidget(self.btn_settings)
@@ -2270,6 +2358,14 @@ class HomeWindow(QMainWindow):
         sp_lay.setSpacing(8)
 
         sp_top = QHBoxLayout()
+        sp_icon = QLabel()
+        sp_icon.setFixedSize(16, 16)
+        try:
+            sp_icon.setPixmap(_svg_icon("spotify.svg", 16).pixmap(16, 16))
+        except Exception:
+            pass
+        sp_top.addWidget(sp_icon)
+
         sp_name = QLabel("Spotify")
         sp_name.setStyleSheet("font-weight: 900;")
         sp_top.addWidget(sp_name)
@@ -2283,6 +2379,8 @@ class HomeWindow(QMainWindow):
             "QPushButton:disabled { background: #2b2f36; color: #7f8793; }"
         )
 
+        self.spotify_logout.clicked.connect(self._spotify_log_out)
+
         # Placeholder: Spotify sign-in UI is currently hard-coded; real auth wiring comes next.
         self.spotify_login = QPushButton("Sign in")
         self.spotify_login.setFixedHeight(28)
@@ -2291,23 +2389,22 @@ class HomeWindow(QMainWindow):
             "QPushButton:hover { border-color: #3b414b; }"
         )
 
-        def _spotify_login_stub():
-            QMessageBox.information(
-                self,
-                "Spotify",
-                "Spotify sign-in from the UI is coming next.\n\n"
-                "For now: you can still add playlists via URL in ‘Add Playlists’.",
-            )
-
-        self.spotify_login.clicked.connect(_spotify_login_stub)
+        self.spotify_login.clicked.connect(self._spotify_sign_in)
 
         sp_top.addWidget(self.spotify_login)
         sp_top.addWidget(self.spotify_logout)
         sp_lay.addLayout(sp_top)
 
+        self.spotify_user = QLabel("")
+        self.spotify_user.setStyleSheet(f"color: {_MUTED};")
+        sp_lay.addWidget(self.spotify_user)
+
         self.spotify_counts = QLabel("")
-        self.spotify_counts.setStyleSheet(f"color: {_MUTED}; font-weight: 700;")
+        self.spotify_counts.setStyleSheet(f"color: {_MUTED}; font-weight: 400;")
         sp_lay.addWidget(self.spotify_counts)
+
+        # Set initial auth UI state.
+        self._update_spotify_auth_ui()
 
         s_outer.addWidget(self.spotify_card)
         s_outer.addStretch(1)
@@ -2358,8 +2455,12 @@ class HomeWindow(QMainWindow):
         self._run_started_at_sql: Optional[str] = None
         self._notifications: list[dict] = []
         self._notifications_unread: int = 0
+        self._notif_seq: int = 0
         self._synced_ids: set[str] = set()
         self._toggle_sync_mode: str | None = None  # "enable" | "disable" | None
+
+        # Cursor consistency: pointer for clickable controls.
+        _apply_pointer_cursor(root)
 
         # Notifications dropdown panel
         self.notifications_panel = QFrame(self)
@@ -2370,9 +2471,20 @@ class HomeWindow(QMainWindow):
         n_lay.setContentsMargins(14, 12, 14, 12)
         n_lay.setSpacing(10)
 
+        n_header = QHBoxLayout()
         n_title = QLabel("Notifications")
         n_title.setStyleSheet("color: #e7eaf0; font-weight: 900;")
-        n_lay.addWidget(n_title)
+        n_header.addWidget(n_title, 1)
+
+        self.notifications_clear_all = QPushButton("Clear all")
+        self.notifications_clear_all.setFixedHeight(26)
+        self.notifications_clear_all.setStyleSheet(
+            "QPushButton { background: transparent; color: #a9b0bb; border: 1px solid #2b2f36; border-radius: 10px; padding: 0 10px; font-weight: 800; }"
+            "QPushButton:hover { border-color: #3b414b; color: #e7eaf0; }"
+        )
+        self.notifications_clear_all.clicked.connect(self._clear_all_notifications)
+        n_header.addWidget(self.notifications_clear_all, 0, Qt.AlignRight)
+        n_lay.addLayout(n_header)
 
         self.notifications_list = QWidget()
         self.notifications_list_lay = QVBoxLayout(self.notifications_list)
@@ -2438,8 +2550,10 @@ class HomeWindow(QMainWindow):
         self._spotlight.setGeometry(0, 0, self.width(), self.height())
         self._tip = _TipPopover(self)
         self._tip.closed.connect(self._tutorial_close)
-        self._tip.hide_clicked.connect(self._tutorial_hide_forever)
         self._tip.next_clicked.connect(self._tutorial_next)
+
+        # Load persisted notifications (last 10) so they survive restarts and Spotify sign-in/out.
+        self._load_persisted_notifications()
 
         self._load_cards_from_db()
 
@@ -2745,9 +2859,79 @@ class HomeWindow(QMainWindow):
         thread.start()
 
     def _push_notification(self, text: str, *, kind: str = "info") -> None:
-        self._notifications.insert(0, {"text": text, "kind": kind})
-        self._notifications = self._notifications[:30]
+        try:
+            self._notif_seq = int(getattr(self, "_notif_seq", 0) or 0) + 1
+        except Exception:
+            self._notif_seq = 1
+        nid = f"{int(time.time() * 1000)}-{self._notif_seq}"
+
+        self._notifications.insert(0, {"id": nid, "text": text, "kind": kind, "ts": int(time.time())})
+        # Persist only the most recent 10 (requirement).
+        self._notifications = self._notifications[:10]
         self._notifications_unread += 1
+        self._persist_notifications()
+        self._refresh_notifications_icon()
+        self._refresh_notifications_list()
+
+    def _persist_notifications(self) -> None:
+        try:
+            payload = self._notifications[:10]
+            self._settings.setValue("notifications_json", json.dumps(payload, separators=(",", ":")))
+        except Exception:
+            pass
+
+    def _load_persisted_notifications(self) -> None:
+        try:
+            raw = str(self._settings.value("notifications_json", "") or "").strip()
+            if not raw:
+                self._notifications = []
+            else:
+                data = json.loads(raw)
+                if isinstance(data, list):
+                    cleaned: list[dict] = []
+                    for item in data[:10]:
+                        if not isinstance(item, dict):
+                            continue
+                        text = str(item.get("text") or "").strip()
+                        if not text:
+                            continue
+                        cleaned.append(
+                            {
+                                "id": str(item.get("id") or ""),
+                                "text": text,
+                                "kind": str(item.get("kind") or "info"),
+                                "ts": int(item.get("ts") or 0),
+                            }
+                        )
+                    self._notifications = cleaned[:10]
+                else:
+                    self._notifications = []
+        except Exception:
+            self._notifications = []
+
+        # Persisted notifications are treated as already read on launch.
+        self._notifications_unread = 0
+        try:
+            self._refresh_notifications_icon()
+            self._refresh_notifications_list()
+        except Exception:
+            pass
+
+    def _dismiss_notification(self, nid: str) -> None:
+        nid = (nid or "").strip()
+        if not nid:
+            return
+        try:
+            self._notifications = [n for n in self._notifications if str(n.get("id") or "") != nid]
+            self._persist_notifications()
+            self._refresh_notifications_list()
+        except Exception:
+            pass
+
+    def _clear_all_notifications(self) -> None:
+        self._notifications = []
+        self._notifications_unread = 0
+        self._persist_notifications()
         self._refresh_notifications_icon()
         self._refresh_notifications_list()
 
@@ -2820,8 +3004,15 @@ class HomeWindow(QMainWindow):
             self.notifications_list_lay.addStretch(1)
             return
 
-        for n in self._notifications[:8]:
-            self.notifications_list_lay.addWidget(_NotificationRow(n["text"], kind=n.get("kind") or "info"))
+        for n in self._notifications[:10]:
+            nid = str(n.get("id") or "")
+            self.notifications_list_lay.addWidget(
+                _NotificationRow(
+                    n["text"],
+                    kind=n.get("kind") or "info",
+                    on_close=(lambda _nid=nid: self._dismiss_notification(_nid)),
+                )
+            )
 
         self.notifications_list_lay.addStretch(1)
 
@@ -2962,6 +3153,163 @@ class HomeWindow(QMainWindow):
             self.spotify_counts.setText(f"{pl} synced playlists      {songs} synced songs")
         except Exception:
             self.spotify_counts.setText("—")
+
+    def _update_spotify_auth_ui(self) -> None:
+        authed = False
+        try:
+            from spotify_client import SpotifyClient
+
+            authed = SpotifyClient.has_cached_token()
+        except Exception:
+            authed = False
+
+        try:
+            self.spotify_login.setEnabled(not authed)
+            self.spotify_logout.setEnabled(authed)
+            self.spotify_login.setText("Signed in" if authed else "Sign in")
+        except Exception:
+            pass
+
+        try:
+            if authed:
+                name = str(self._settings.value("spotify_user_display_name", "") or "").strip()
+                uid = str(self._settings.value("spotify_user_id", "") or "").strip()
+                who = name or uid
+                if not who:
+                    # Token exists but we haven't cached identity yet (e.g. older installs).
+                    try:
+                        from spotify_client import SpotifyClient
+
+                        me = SpotifyClient.get_current_user() or {}
+                        uid = (me.get("id") or "").strip() if isinstance(me, dict) else ""
+                        name = (me.get("display_name") or uid or "").strip() if isinstance(me, dict) else ""
+                        if uid:
+                            self._settings.setValue("spotify_user_id", uid)
+                        if name:
+                            self._settings.setValue("spotify_user_display_name", name)
+                        who = name or uid
+                    except Exception:
+                        pass
+                self.spotify_user.setText(f"Signed in as {who}" if who else "Signed in")
+            else:
+                self.spotify_user.setText("Not signed in")
+        except Exception:
+            pass
+
+    def _spotify_sign_in(self) -> None:
+        # Request only what we need for the app.
+        scope = "playlist-read-private playlist-read-collaborative"
+
+        try:
+            self.spotify_login.setEnabled(False)
+            self.spotify_login.setText("Signing in…")
+        except Exception:
+            pass
+
+        thread = QThread(self)
+        worker = _SpotifyAuthWorker(scope=scope)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+
+        def _done(who: str):
+            try:
+                self._push_notification(f"Spotify connected: {who}", kind="success")
+            except Exception:
+                pass
+            try:
+                try:
+                    from spotify_client import SpotifyClient
+
+                    me = SpotifyClient.get_current_user() or {}
+                    uid = (me.get("id") or "").strip() if isinstance(me, dict) else ""
+                    name = (me.get("display_name") or uid or "").strip() if isinstance(me, dict) else ""
+                    if uid:
+                        self._settings.setValue("spotify_user_id", uid)
+                    if name:
+                        self._settings.setValue("spotify_user_display_name", name)
+                except Exception:
+                    pass
+                self._update_spotify_auth_ui()
+            finally:
+                thread.quit()
+
+        def _failed(msg: str):
+            try:
+                self._push_notification(f"Spotify sign-in failed: {msg}", kind="error")
+            except Exception:
+                pass
+            try:
+                self.spotify_login.setEnabled(True)
+                self.spotify_login.setText("Sign in")
+            except Exception:
+                pass
+            thread.quit()
+
+        worker.done.connect(_done)
+        worker.failed.connect(_failed)
+        worker.done.connect(lambda _x: thread.quit())
+        worker.failed.connect(lambda _x: thread.quit())
+
+        def _cleanup():
+            try:
+                worker.deleteLater()
+            except Exception:
+                pass
+            try:
+                thread.deleteLater()
+            except Exception:
+                pass
+
+        thread.finished.connect(_cleanup)
+        thread.start()
+
+    def _spotify_log_out(self) -> None:
+        user_id = ""
+        try:
+            user_id = str(self._settings.value("spotify_user_id", "") or "").strip()
+        except Exception:
+            user_id = ""
+
+        try:
+            from spotify_client import SpotifyClient
+
+            SpotifyClient.logout()
+        except Exception:
+            pass
+
+        # Freeze known-private playlists owned by the signed-out user.
+        if user_id:
+            try:
+                from db import get_conn
+
+                conn = get_conn()
+                try:
+                    conn.execute(
+                        "UPDATE playlists SET sync_enabled = 0 "
+                        "WHERE spotify_owner_id = ? AND spotify_is_public = 0",
+                        (user_id,),
+                    )
+                    conn.commit()
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        try:
+            self._settings.setValue("spotify_user_id", "")
+            self._settings.setValue("spotify_user_display_name", "")
+        except Exception:
+            pass
+
+        try:
+            self._push_notification("Spotify logged out", kind="info")
+        except Exception:
+            pass
+        self._update_spotify_auth_ui()
+        self._load_cards_from_db()
 
     def _show_add_page(self) -> None:
         self.page_title.setText("Add Playlists")
@@ -3326,6 +3674,42 @@ class HomeWindow(QMainWindow):
                 pass
             note = f"Sync disabled for {len(ids)} playlist(s)"
         else:
+            # If signed out, block enabling sync for known-private playlists.
+            try:
+                from spotify_client import SpotifyClient
+
+                if not SpotifyClient.has_cached_token():
+                    from db import get_conn
+
+                    conn = get_conn()
+                    try:
+                        q = ",".join("?" for _ in ids)
+                        rows = conn.execute(
+                            f"SELECT id, name FROM playlists WHERE id IN ({q}) AND spotify_is_public = 0",
+                            tuple(ids),
+                        ).fetchall()
+                    finally:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+
+                    if rows:
+                        names = [str(r["name"] or r["id"]) for r in rows if r]
+                        shown = "\n".join(f"• {n}" for n in names[:6])
+                        if len(names) > 6:
+                            shown += f"\n• (+{len(names) - 6} more)"
+                        QMessageBox.information(
+                            self,
+                            "Sign in required",
+                            "These playlist(s) appear to be private.\n\n"
+                            "Sign in to Spotify to unfreeze them, or make them public on Spotify.\n\n"
+                            + shown,
+                        )
+                        return
+            except Exception:
+                pass
+
             msg = (
                 f"Enable syncing for {len(ids)} playlist(s)?\n\n"
                 "Future syncs will update them."

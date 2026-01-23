@@ -101,6 +101,8 @@ def init_db():
         _ensure_column(conn, "playlists", "creator", "TEXT")
         _ensure_column(conn, "playlists", "created_at", "TEXT")
         _ensure_column(conn, "playlists", "spotify_created_at", "TEXT")
+        _ensure_column(conn, "playlists", "spotify_owner_id", "TEXT")
+        _ensure_column(conn, "playlists", "spotify_is_public", "INTEGER")
         sync_enabled_added = _ensure_column(conn, "playlists", "sync_enabled", "INTEGER DEFAULT 1")
         _ensure_column(conn, "tracks", "cover_url", "TEXT")
 
@@ -297,16 +299,37 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_def
 
 def upsert_playlist(conn, playlist):
     """Insert or update a playlist row."""
-    conn.execute("""
-                                INSERT INTO playlists (id, name, creator, snapshot_id, image_url)
-                                VALUES (?, ?, ?, ?, ?)
+    conn.execute(
+        """
+        INSERT INTO playlists (
+          id,
+          name,
+          creator,
+          snapshot_id,
+          image_url,
+          spotify_owner_id,
+          spotify_is_public
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name=excluded.name,
-                    creator=excluded.creator,
-          snapshot_id=excluded.snapshot_id,
-                    image_url=excluded.image_url,
+          creator=COALESCE(excluded.creator, playlists.creator),
+          snapshot_id=COALESCE(excluded.snapshot_id, playlists.snapshot_id),
+          image_url=COALESCE(excluded.image_url, playlists.image_url),
+          spotify_owner_id=COALESCE(excluded.spotify_owner_id, playlists.spotify_owner_id),
+          spotify_is_public=COALESCE(excluded.spotify_is_public, playlists.spotify_is_public),
           updated_at=CURRENT_TIMESTAMP
-                """, (playlist["id"], playlist["name"], playlist.get("creator"), playlist.get("snapshot_id"), playlist.get("image_url")))
+        """,
+        (
+            playlist["id"],
+            playlist["name"],
+            playlist.get("creator"),
+            playlist.get("snapshot_id"),
+            playlist.get("image_url"),
+            playlist.get("spotify_owner_id"),
+            playlist.get("spotify_is_public"),
+        ),
+    )
 
 
 # ---------------------------
