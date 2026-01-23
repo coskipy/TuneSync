@@ -128,11 +128,29 @@ def sync() -> Tuple[List[dict], List[dict], bool]:
         # Snapshot changed or new playlist: refresh contents
         playlist_name = meta.get("name", "Unknown")
         tracks = SpotifyClient.get_playlist_tracks(pid)
+
+        # Replace links so removed tracks don't linger in DB.
+        conn.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?", (pid,))
+        min_added_at: str | None = None
         for t in tracks:
             upsert_track(conn, t)
+            added_at = t.get("added_at")
             # store added_at so exports can preserve Spotify order
-            link_playlist_track(conn, pid, t["id"], added_at=t.get("added_at"))
-        # (If you prefer to clear+bulk re-link, _refresh_playlist_links(conn, pid, tracks) also does this)
+            link_playlist_track(conn, pid, t["id"], added_at=added_at)
+            if added_at:
+                if min_added_at is None or added_at < min_added_at:
+                    min_added_at = added_at
+
+        # Best-effort: treat earliest "added_at" as a proxy for playlist creation.
+        # Only set it once so it stays stable even if early tracks are later removed.
+        if min_added_at:
+            try:
+                conn.execute(
+                    "UPDATE playlists SET spotify_created_at = COALESCE(spotify_created_at, ?) WHERE id = ?",
+                    (min_added_at, pid),
+                )
+            except Exception:
+                pass
         updated += 1
 
     print(f"📋 Checked {total} playlists (updated: {updated}, unchanged: {skipped})")

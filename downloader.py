@@ -886,3 +886,126 @@ def download_missing_batch(
                 )
     
     return results
+
+
+def download_track_from_url(
+    *,
+    url: str,
+    track_id: str,
+    artist: str,
+    title: str,
+    out_root: Path,
+    aac_kbps: int = 192,
+    progress: bool = True,
+) -> DownloadResult:
+    """Download from an explicit URL (YouTube/SoundCloud/etc.) and save using the normal naming scheme."""
+    if not _have_ffmpeg():
+        return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, error="ffmpeg not found on PATH")
+
+    label = f"{artist} - {title}"
+    try:
+        out_root.mkdir(parents=True, exist_ok=True)
+        base = f"{_sanitize(label)} [{track_id[:8]}]"
+
+        # Short-circuit if already exists.
+        for ext in ("m4a", "mp3", "flac", "wav", "aiff", "alac", "aac", "webm", "opus"):
+            p = (out_root / base).with_suffix(f".{ext}")
+            if p.exists():
+                return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title, final_path=p, source_url=url, ext=ext)
+
+        hooks = [_make_progress_hook(label)] if progress else []
+        if progress:
+            print(f"\r  {label}: Downloading…", end="", flush=True)
+
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "ignoreerrors": True,
+            "noplaylist": True,
+            "continuedl": True,
+            "concurrent_fragment_downloads": 1,
+            "retries": 5,
+            "fragment_retries": 10,
+            "overwrites": False,
+            "noprogress": True,
+            "format": "140/251/bestaudio/139/91/92/93/94/95/96",
+            "outtmpl": str(out_root / f"{base}.%(ext)s"),
+            "postprocessors": [],
+            "progress_hooks": hooks,
+            "cookiesfrombrowser": ["chrome"],
+            "sleep_interval": 1,
+            "max_sleep_interval": 3,
+        }
+
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info is None:
+                return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, source_url=url, error="Download failed")
+            if info.get("_type") == "playlist" and info.get("entries"):
+                info = info["entries"][0]
+
+            actual_filepath = info.get("_filename") or info.get("filepath")
+            final: Optional[Path]
+            if actual_filepath and Path(actual_filepath).exists():
+                final = Path(actual_filepath)
+            else:
+                # Fallback: locate by track id in output folder.
+                track_id_short = track_id[:8]
+                final = None
+                for _retry in range(8):
+                    for audio_ext in ("m4a", "mp3", "opus", "webm", "aac", "mp4", "flac", "wav"):
+                        pattern = f"*[{track_id_short}]*.{audio_ext}"
+                        matches = list(out_root.glob(pattern))
+                        if matches:
+                            found = max(matches, key=lambda p: p.stat().st_mtime)
+                            expected = out_root / f"{base}.{audio_ext}"
+                            if found != expected:
+                                try:
+                                    found.rename(expected)
+                                    final = expected
+                                except OSError:
+                                    final = found
+                            else:
+                                final = found
+                            break
+                    if final:
+                        break
+                    time.sleep(0.5)
+
+            if not final:
+                return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, source_url=url, error="Download reported success but file not found")
+
+            # Preview guard.
+            actual_duration = _safe_duration_seconds(final)
+            if actual_duration and actual_duration < 60:
+                try:
+                    final.unlink()
+                except OSError:
+                    pass
+                return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, source_url=url, error="Only preview found (< 60 seconds)")
+
+            ext = final.suffix.lstrip(".").lower()
+            if ext in REKORDBOX_AUDIO_EXTS:
+                abr = int(info["abr"]) if isinstance(info.get("abr"), (int, float)) else None
+                if ALWAYS_TRANSCODE_TO and ext not in (ALWAYS_TRANSCODE_TO, "mp3"):
+                    m4a_path = out_root / f"{base}.{ALWAYS_TRANSCODE_TO}"
+                    _ffmpeg_transcode_to_m4a(final, m4a_path, aac_kbps=aac_kbps)
+                    try:
+                        final.unlink()
+                    except OSError:
+                        pass
+                    return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title, final_path=m4a_path, source_url=url, ext=ALWAYS_TRANSCODE_TO, abr_kbps=aac_kbps, transcoded=True)
+
+                return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title, final_path=final, source_url=url, ext=ext, abr_kbps=abr, transcoded=False)
+
+            # Not Rekordbox compatible, transcode.
+            m4a_path = out_root / f"{base}.m4a"
+            _ffmpeg_transcode_to_m4a(final, m4a_path, aac_kbps=aac_kbps)
+            try:
+                final.unlink()
+            except OSError:
+                pass
+            return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title, final_path=m4a_path, source_url=url, ext="m4a", abr_kbps=aac_kbps, transcoded=True)
+
+    except Exception as e:
+        return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, source_url=url, error=_classify_error(str(e)))

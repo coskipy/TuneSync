@@ -7,7 +7,7 @@ import sys
 import traceback
 from dotenv import load_dotenv
 
-from db import init_db, get_conn, get_missing_tracks, attach_file
+from db import init_db, get_conn, get_missing_tracks, attach_file, mark_track_unavailable
 from sync import sync, get_synced_alias_map
 from rescan import rescan_existing_files, purge_bad_duration_files
 from downloader import download_missing_batch
@@ -132,6 +132,14 @@ if __name__ == "__main__":
                             print(f"⚠️  Failed to record {r.title}: {e}")
                             failures.append(r)
                     elif r:
+                        # If a track is consistently not found, mark it as unavailable so
+                        # it no longer blocks playlists as "missing".
+                        try:
+                            err_l = (r.error or "").strip().lower()
+                            if "no suitable youtube match" in err_l:
+                                mark_track_unavailable(conn, r.track_id, reason=r.error)
+                        except Exception:
+                            pass
                         failures.append(r)
                     
                     # Batch commit every N files

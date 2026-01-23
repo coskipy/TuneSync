@@ -100,8 +100,36 @@ def init_db():
         _ensure_column(conn, "playlists", "image_url", "TEXT")
         _ensure_column(conn, "playlists", "creator", "TEXT")
         _ensure_column(conn, "playlists", "created_at", "TEXT")
+        _ensure_column(conn, "playlists", "spotify_created_at", "TEXT")
         sync_enabled_added = _ensure_column(conn, "playlists", "sync_enabled", "INTEGER DEFAULT 1")
         _ensure_column(conn, "tracks", "cover_url", "TEXT")
+
+        # Best-effort backfill: approximate Spotify playlist creation date from the
+        # earliest added_at we have for that playlist.
+        try:
+            conn.execute(
+                """
+                UPDATE playlists
+                SET spotify_created_at = (
+                    SELECT MIN(added_at)
+                    FROM playlist_tracks
+                    WHERE playlist_tracks.playlist_id = playlists.id
+                      AND added_at IS NOT NULL
+                )
+                WHERE spotify_created_at IS NULL
+                """
+            )
+        except Exception:
+            pass
+
+        # Track availability + manual locate state.
+        _ensure_column(conn, "tracks", "unavailable", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "tracks", "unavailable_archived", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "tracks", "unavailable_reason", "TEXT")
+        _ensure_column(conn, "tracks", "unavailable_at", "TEXT")
+        _ensure_column(conn, "tracks", "manual_url", "TEXT")
+        _ensure_column(conn, "tracks", "manual_located_at", "TEXT")
+        _ensure_column(conn, "tracks", "manual_last_error", "TEXT")
 
         # One-time, best-effort migration: if we just added sync_enabled and a legacy
         # synced.txt exists, mirror its selections into the DB. Normal operation does
@@ -368,10 +396,92 @@ def get_missing_tracks(conn, min_duration_sec: int = 60):
         JOIN playlists p ON p.id = pt.playlist_id
         WHERE COALESCE(p.sync_enabled, 1) = 1
           AND t.id NOT IN (SELECT track_id FROM files)
+          AND COALESCE(t.unavailable, 0) = 0
           AND (t.duration_ms IS NULL OR t.duration_ms >= ?)
         ORDER BY t.artist, t.name
         """,
         (min_duration_ms,),
+    ).fetchall()
+
+
+def mark_track_unavailable(conn, track_id: str, *, reason: str | None = None) -> None:
+    """Mark a track as unavailable (e.g., not found) so it won't be treated as missing."""
+    conn.execute(
+        """
+        UPDATE tracks
+        SET unavailable = 1,
+            unavailable_reason = ?,
+            unavailable_at = COALESCE(unavailable_at, CURRENT_TIMESTAMP),
+            manual_last_error = ?
+        WHERE id = ?
+        """,
+        (reason, reason, track_id),
+    )
+
+
+def clear_track_unavailable(conn, track_id: str, *, manual_url: str | None = None) -> None:
+    """Clear unavailable state (used when a track is manually located/downloaded)."""
+    conn.execute(
+        """
+        UPDATE tracks
+        SET unavailable = 0,
+            unavailable_archived = 0,
+            unavailable_reason = NULL,
+            unavailable_at = NULL,
+            manual_url = COALESCE(?, manual_url),
+            manual_located_at = CASE WHEN ? IS NOT NULL THEN CURRENT_TIMESTAMP ELSE manual_located_at END,
+            manual_last_error = NULL
+        WHERE id = ?
+        """,
+        (manual_url, manual_url, track_id),
+    )
+
+
+def set_track_unavailable_archived(conn, track_id: str, archived: bool) -> None:
+    conn.execute(
+        "UPDATE tracks SET unavailable_archived = ? WHERE id = ?",
+        (1 if archived else 0, track_id),
+    )
+
+
+def set_track_manual_error(conn, track_id: str, msg: str | None) -> None:
+    conn.execute(
+        "UPDATE tracks SET manual_last_error = ? WHERE id = ?",
+        (msg, track_id),
+    )
+
+
+def get_unavailable_tracks(conn, *, archived: bool | None = None):
+    """Return unavailable tracks (no file) referenced by sync-enabled playlists."""
+    where_arch = ""
+    params: list[object] = []
+    if archived is not None:
+        where_arch = " AND COALESCE(t.unavailable_archived, 0) = ?"
+        params.append(1 if archived else 0)
+
+    return conn.execute(
+        """
+        SELECT DISTINCT
+          t.id,
+          t.name,
+          t.artist,
+          t.cover_url,
+          t.unavailable_reason,
+          t.unavailable_at,
+          t.manual_url,
+          t.manual_last_error,
+          COALESCE(t.unavailable_archived, 0) AS unavailable_archived
+        FROM tracks t
+        JOIN playlist_tracks pt ON pt.track_id = t.id
+        JOIN playlists p ON p.id = pt.playlist_id
+        LEFT JOIN files f ON f.track_id = t.id
+        WHERE COALESCE(p.sync_enabled, 1) = 1
+          AND f.track_id IS NULL
+          AND COALESCE(t.unavailable, 0) = 1
+        """
+        + where_arch
+        + " ORDER BY t.artist, t.name",
+        tuple(params),
     ).fetchall()
 
 
