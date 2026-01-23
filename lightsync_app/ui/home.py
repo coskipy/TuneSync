@@ -443,9 +443,15 @@ def _svg_icon(name: str, size: int = 18) -> QIcon:
 class _NotificationRow(QFrame):
     def __init__(self, text: str, *, kind: str = "info"):
         super().__init__()
+        self._raw_text = text
         self.setStyleSheet(
             "QFrame { background: #0f1216; border: none; border-radius: 12px; }"
         )
+
+        # Keep rows compact and avoid vertical stretching.
+        self.setFixedHeight(40)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
         lay = QHBoxLayout(self)
         lay.setContentsMargins(10, 6, 10, 6)
         lay.setSpacing(8)
@@ -461,10 +467,30 @@ class _NotificationRow(QFrame):
             dot.setStyleSheet("color: #7f8793; font-size: 12px;")
         lay.addWidget(dot, 0)
 
-        lbl = QLabel(text)
-        lbl.setWordWrap(True)
-        lbl.setStyleSheet("color: #e7eaf0; font-size: 13px;")
-        lay.addWidget(lbl, 1)
+        self._lbl = QLabel("")
+        self._lbl.setWordWrap(False)
+        self._lbl.setStyleSheet("color: #e7eaf0; font-size: 13px;")
+        self._lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._lbl.setFixedHeight(18)
+        lay.addWidget(self._lbl, 1)
+
+        self._set_elided()
+
+    def _set_elided(self) -> None:
+        try:
+            metrics = QFontMetrics(self._lbl.font())
+            # Leave some breathing room for layout + dot.
+            max_w = max(10, int(self.width()) - 60)
+            self._lbl.setText(metrics.elidedText(self._raw_text or "", Qt.ElideRight, max_w))
+        except Exception:
+            try:
+                self._lbl.setText(self._raw_text or "")
+            except Exception:
+                pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._set_elided()
 
 
 class _StorageBar(QFrame):
@@ -1164,7 +1190,7 @@ class _MissingTrackRow(QFrame):
 
 
 class SelectablePlaylistCard(QFrame):
-    toggled = Signal(str, bool)  # playlist_id, selected
+    toggled = Signal(str, bool, bool)  # playlist_id, selected, shift
 
     def __init__(
         self,
@@ -1298,8 +1324,20 @@ class SelectablePlaylistCard(QFrame):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
+            shift = False
+            try:
+                shift = bool(event.modifiers() & Qt.ShiftModifier)
+            except Exception:
+                shift = False
+
+            if shift:
+                # Let the controller handle range selection.
+                self.toggled.emit(self._pid, self._selected, True)
+                event.accept()
+                return
+
             self.set_selected(not self._selected)
-            self.toggled.emit(self._pid, self._selected)
+            self.toggled.emit(self._pid, self._selected, False)
             event.accept()
             return
         super().mousePressEvent(event)
@@ -1324,6 +1362,7 @@ class AddPlaylistsPage(QWidget):
         self._selected: set[str] = set()
         self._tile_by_pid: dict[str, SelectablePlaylistCard] = {}
         self._ordered_pids: list[str] = []
+        self._selection_anchor_pid: str | None = None
         self._reflow_timer = QTimer(self)
         self._reflow_timer.setSingleShot(True)
         self._reflow_timer.setInterval(90)
@@ -1596,11 +1635,54 @@ class AddPlaylistsPage(QWidget):
         except Exception:
             pass
 
-    def _on_toggled(self, pid: str, selected: bool) -> None:
+    def _on_toggled(self, pid: str, selected: bool, shift: bool = False) -> None:
+        if shift:
+            ordered = [x for x in (self._ordered_pids or []) if isinstance(x, str) and x]
+            if not ordered:
+                return
+
+            anchor = getattr(self, "_selection_anchor_pid", None)
+            if not anchor:
+                anchor = next(iter(self._selected), pid)
+                self._selection_anchor_pid = anchor
+
+            # If clicked item is currently selected, shift-click deselects the range.
+            deselect_mode = bool(selected)
+
+            if anchor in ordered and pid in ordered:
+                a = ordered.index(anchor)
+                b = ordered.index(pid)
+                lo, hi = (a, b) if a <= b else (b, a)
+                for x in ordered[lo : hi + 1]:
+                    tile = self._tile_by_pid.get(x)
+                    if deselect_mode:
+                        self._selected.discard(x)
+                        if tile is not None:
+                            tile.set_selected(False)
+                    else:
+                        self._selected.add(x)
+                        if tile is not None:
+                            tile.set_selected(True)
+            else:
+                # Fallback: toggle only this one.
+                tile = self._tile_by_pid.get(pid)
+                if deselect_mode:
+                    self._selected.discard(pid)
+                    if tile is not None:
+                        tile.set_selected(False)
+                else:
+                    self._selected.add(pid)
+                    if tile is not None:
+                        tile.set_selected(True)
+
+            self._update_buttons()
+            return
+
         if selected:
             self._selected.add(pid)
         else:
             self._selected.discard(pid)
+        self._selection_anchor_pid = pid
         self._update_buttons()
 
     def _update_buttons(self) -> None:
@@ -2296,6 +2378,10 @@ class HomeWindow(QMainWindow):
         self.notifications_list_lay = QVBoxLayout(self.notifications_list)
         self.notifications_list_lay.setContentsMargins(0, 0, 0, 0)
         self.notifications_list_lay.setSpacing(8)
+        try:
+            self.notifications_list_lay.setAlignment(Qt.AlignTop)
+        except Exception:
+            pass
         self.notifications_scroll = QScrollArea()
         self.notifications_scroll.setWidgetResizable(True)
         self.notifications_scroll.setFrameShape(QFrame.NoFrame)
@@ -2310,7 +2396,7 @@ class HomeWindow(QMainWindow):
         self.missing_panel = QFrame(self)
         self.missing_panel.setVisible(False)
         self.missing_panel.setStyleSheet("background: #0b0e12; border-radius: 14px;")
-        self.missing_panel.setFixedWidth(760)
+        self.missing_panel.setFixedWidth(380)
         m_lay = QVBoxLayout(self.missing_panel)
         m_lay.setContentsMargins(14, 12, 14, 12)
         m_lay.setSpacing(10)
@@ -2322,7 +2408,11 @@ class HomeWindow(QMainWindow):
         self.missing_list = QWidget()
         self.missing_list_lay = QVBoxLayout(self.missing_list)
         self.missing_list_lay.setContentsMargins(0, 0, 0, 0)
-        self.missing_list_lay.setSpacing(10)
+        self.missing_list_lay.setSpacing(8)
+        try:
+            self.missing_list_lay.setAlignment(Qt.AlignTop)
+        except Exception:
+            pass
         self.missing_scroll = QScrollArea()
         self.missing_scroll.setWidgetResizable(True)
         self.missing_scroll.setFrameShape(QFrame.NoFrame)
@@ -2330,7 +2420,7 @@ class HomeWindow(QMainWindow):
         self.missing_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.missing_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.missing_scroll.setWidget(self.missing_list)
-        self.missing_scroll.setFixedHeight(360)
+        self.missing_scroll.setFixedHeight(320)
         m_lay.addWidget(self.missing_scroll)
 
         self._locate_threads: dict[str, QThread] = {}
@@ -2484,8 +2574,8 @@ class HomeWindow(QMainWindow):
             x = anchor.x() + self.btn_missing.width() - self.missing_panel.width()
             y = anchor.y()
 
-            max_panel_h = max(260, self.height() - margin * 2)
-            self.missing_scroll.setFixedHeight(min(360, max_panel_h - 70))
+            max_panel_h = max(220, self.height() - margin * 2)
+            self.missing_scroll.setFixedHeight(min(320, max_panel_h - 70))
             self.missing_panel.adjustSize()
 
             x = max(margin, min(x, self.width() - self.missing_panel.width() - margin))
@@ -2540,6 +2630,8 @@ class HomeWindow(QMainWindow):
         except Exception:
             active = []
             archived = []
+
+        self._set_missing_icon(has_missing=bool(active or archived))
 
         if not active and not archived:
             empty = QLabel("No missing tracks.")
@@ -2667,6 +2759,53 @@ class HomeWindow(QMainWindow):
         icon_name = "notification_unread.svg" if self._notifications_unread > 0 else "notifications.svg"
         self.btn_notifications.setIcon(_svg_icon(icon_name, _TOPBAR_ICON_PX))
 
+    def _set_missing_icon(self, *, has_missing: bool) -> None:
+        icon_name = "missing.svg" if has_missing else "no_missing.svg"
+        try:
+            self.btn_missing.setIcon(_svg_icon(icon_name, _TOPBAR_ICON_PX))
+        except Exception:
+            pass
+
+    def _refresh_missing_icon(self) -> None:
+        # Missing/unavailable tracks are those marked unavailable (regardless of archived)
+        # and referenced by sync-enabled playlists, with no local file.
+        has_missing = False
+        try:
+            from db import get_conn
+
+            conn = get_conn()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT t.id) AS n
+                    FROM tracks t
+                    JOIN playlist_tracks pt ON pt.track_id = t.id
+                    JOIN playlists p ON p.id = pt.playlist_id
+                    LEFT JOIN files f ON f.track_id = t.id
+                    WHERE COALESCE(p.sync_enabled, 1) = 1
+                      AND f.track_id IS NULL
+                      AND COALESCE(t.unavailable, 0) = 1
+                    """
+                ).fetchone()
+                n = (
+                    int(row["n"])
+                    if row
+                    and hasattr(row, "keys")
+                    and "n" in row.keys()
+                    and row["n"] is not None
+                    else 0
+                )
+                has_missing = n > 0
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception:
+            has_missing = False
+
+        self._set_missing_icon(has_missing=has_missing)
+
     def _refresh_notifications_list(self) -> None:
         while self.notifications_list_lay.count():
             it = self.notifications_list_lay.takeAt(0)
@@ -2678,10 +2817,13 @@ class HomeWindow(QMainWindow):
             empty = QLabel("No notifications yet.")
             empty.setStyleSheet("color: #a9b0bb;")
             self.notifications_list_lay.addWidget(empty)
+            self.notifications_list_lay.addStretch(1)
             return
 
         for n in self._notifications[:8]:
             self.notifications_list_lay.addWidget(_NotificationRow(n["text"], kind=n.get("kind") or "info"))
+
+        self.notifications_list_lay.addStretch(1)
 
     def _refresh_settings(self) -> None:
         self._refresh_storage_stats()
@@ -2948,6 +3090,7 @@ class HomeWindow(QMainWindow):
         self._all_playlists = computed
         self._synced_ids = set(enabled_ids)
         self._apply_filters()
+        self._refresh_missing_icon()
 
     def _apply_filters(self) -> None:
         items = list(self._all_playlists)
