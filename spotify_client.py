@@ -147,12 +147,6 @@ class SpotifyClient:
         return cls._retry(sp.current_user)
 
     @classmethod
-    def get_current_user(cls) -> Dict:
-        """Return the signed-in user's profile (requires a cached token)."""
-        sp = cls.login(silent=True)
-        return cls._retry(sp.current_user)
-
-    @classmethod
     def get_playlist_metadata(cls, playlist_id: str, *, silent: bool = False) -> Dict:
         sp = cls.login(silent=silent)
         p = cls._retry(

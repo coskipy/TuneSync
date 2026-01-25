@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Optional
 
 from lightsync.util.events import Event, Phase
 
@@ -33,8 +33,6 @@ def run_sync(
     ignore_dirs = ignore_dirs or {"old"}
 
     # Import existing modules (keeps current code working)
-    import traceback
-
     from db import init_db, get_conn, get_missing_tracks, attach_file
     from sync import sync, get_synced_alias_map
     from rescan import rescan_existing_files
