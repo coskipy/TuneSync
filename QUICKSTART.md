@@ -1,6 +1,6 @@
 # 🚀 Quick Start Guide
 
-Get LightSync running in 5 minutes!
+Get TuneSync running in 5 minutes!
 
 ## Step 1: Install Prerequisites
 
@@ -17,8 +17,8 @@ sudo apt-get install ffmpeg python3 python3-pip python3-venv
 
 ```bash
 # Clone the repo
-git clone https://github.com/coskipy/LightSync.git
-cd LightSync
+git clone https://github.com/coskipy/TuneSync.git
+cd TuneSync
 
 # Create virtual environment
 python3 -m venv .venv
@@ -33,7 +33,7 @@ pip install -r requirements.txt
 1. Go to https://developer.spotify.com/dashboard
 2. Click "Create App"
 3. Fill in:
-    - App Name: `LightSync` (or whatever you want)
+    - App Name: `TuneSync`
     - App Description: `Personal DJ library sync`
     - Redirect URI: `http://127.0.0.1:5000/callback` ⚠️ IMPORTANT
 4. Save and copy your **Client ID** and **Client Secret**
@@ -62,19 +62,19 @@ REKORDBOX_XML_PATH=/Users/yourname/Music/DJ/rekordbox.xml
 ## Step 5: Run!
 
 ```bash
-python -m lightsync_app
+python -m tunesync_app
 ```
 
 On first run:
 
--   Your browser will open
--   Click "Agree" to authorize
--   LightSync will start syncing!
+- Your browser will open
+- Click "Agree" to authorize
+- TuneSync will start syncing!
 
 Inside the app:
 
--   Use **Add Playlists** to select what to sync
--   Use the sync/export actions to run the pipeline
+- Use **Add Playlists** to select what to sync
+- Use the sync/export actions to run the pipeline
 
 ## 🎉 That's It!
 
@@ -93,12 +93,12 @@ which ffmpeg  # Should show a path
 
 **"Invalid client credentials"**
 
--   Double-check your Client ID and Secret in `.env`
--   Make sure there are no extra spaces
+- Double-check your Client ID and Secret in `.env`
+- Make sure there are no extra spaces
 
 **"Redirect URI mismatch"**
 
--   Verify the redirect URI in your Spotify app settings is EXACTLY: `http://127.0.0.1:5000/callback`
+- Verify the redirect URI in your Spotify app settings is EXACTLY: `http://127.0.0.1:5000/callback`
 
 **Python version too old**
 

@@ -2,7 +2,9 @@
 .env
 
 # Database
-capsize.sqlite3
+TuneSync.sqlite3
+TuneSync.sqlite3-shm
+TuneSync.sqlite3-wal
 
 # Cache and sync files
 .cache/

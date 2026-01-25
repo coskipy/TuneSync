@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import os
+import json
 import subprocess
 import shutil
 import time
@@ -833,10 +835,44 @@ def download_missing_batch(
     """
     total = len(rows)
     completed = 0
+
+    ui_mode = (os.getenv("TUNESYNC_UI", "").strip().lower() in {"1", "true", "yes"})
+
+    def _row_get(row: Any, key: str) -> Any:
+        try:
+            return row[key]
+        except Exception:
+            try:
+                return row.get(key)
+            except Exception:
+                return None
+
+    def _emit_ui(event: dict) -> None:
+        if not ui_mode:
+            return
+        try:
+            with _print_lock:
+                print("@TS " + json.dumps(event, ensure_ascii=False))
+        except Exception:
+            pass
     
     def _download_wrapper(idx: int, r: Dict[str, Any]) -> tuple[int, DownloadResult]:
         """Wrapper to track which track is being downloaded."""
         nonlocal completed
+
+        try:
+            _emit_ui(
+                {
+                    "type": "download_start",
+                    "track_id": _row_get(r, "id"),
+                    "artist": _row_get(r, "artist"),
+                    "title": _row_get(r, "name"),
+                    "idx": idx,
+                    "total": total,
+                }
+            )
+        except Exception:
+            pass
         
         # Disable individual track progress in parallel mode
         res = download_track(
@@ -860,6 +896,27 @@ def download_missing_batch(
             if len(label) > 60:
                 label = label[:57] + "..."
             print(f"  [{completed:>{len(str(total))}}/{total}] {status} {label}")
+
+            if ui_mode:
+                try:
+                    print(
+                        "@TS "
+                        + json.dumps(
+                            {
+                                "type": "download_done",
+                                "track_id": _row_get(r, "id"),
+                                "artist": _row_get(r, "artist"),
+                                "title": _row_get(r, "name"),
+                                "ok": bool(getattr(res, "ok", False)),
+                                "error": getattr(res, "error", None),
+                                "completed": completed,
+                                "total": total,
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                except Exception:
+                    pass
         
         return (idx, res)
     

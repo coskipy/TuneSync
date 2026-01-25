@@ -17,8 +17,8 @@ def _path_from_env(var: str, default: Path) -> Path:
 
 
 # Default to a stable location (repo root) instead of the current working directory.
-DB_PATH = _path_from_env("LIGHTSYNC_DB_PATH", _BASE_DIR / "capsize.sqlite3")
-LEGACY_SYNCED_TXT_PATH = _path_from_env("LIGHTSYNC_SYNCED_TXT_PATH", _BASE_DIR / "synced.txt")
+DB_PATH = _path_from_env("TUNESYNC_DB_PATH", _BASE_DIR / "TuneSync.sqlite3")
+LEGACY_SYNCED_TXT_PATH = _path_from_env("TUNESYNC_SYNCED_TXT_PATH", _BASE_DIR / "synced.txt")
 
 
 def get_conn():
@@ -413,7 +413,7 @@ def get_missing_tracks(conn, min_duration_sec: int = 60):
     # Only consider playlists with sync enabled.
     return conn.execute(
         """
-        SELECT DISTINCT t.id, t.name, t.artist, t.album, t.duration_ms, t.release_date, t.isrc
+                SELECT DISTINCT t.id, t.name, t.artist, t.album, t.duration_ms, t.release_date, t.isrc, t.cover_url
         FROM tracks t
         JOIN playlist_tracks pt ON pt.track_id = t.id
         JOIN playlists p ON p.id = pt.playlist_id

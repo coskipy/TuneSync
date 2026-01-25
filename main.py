@@ -5,6 +5,7 @@ from pathlib import Path
 import os
 import sys
 import traceback
+import json
 from dotenv import load_dotenv
 
 from db import init_db, get_conn, get_missing_tracks, attach_file, mark_track_unavailable
@@ -20,6 +21,22 @@ IGNORE_DIRS = {"old"}  # directories to ignore during rescan
 
 MAX_WORKERS = 8 # Number of parallel download workers
 DEBUG_SEARCH = False  # Set to True to see detailed search results and scoring
+
+MAX_SYNC_ATTEMPTS = 3  # Auto-retry missing downloads up to N times
+
+
+def _ui_mode() -> bool:
+    return (os.getenv("TUNESYNC_UI", "").strip().lower() in {"1", "true", "yes"})
+
+
+def _emit_ts(event: dict) -> None:
+    """Emit a structured event for the TuneSync UI to parse (no-op for CLI)."""
+    if not _ui_mode():
+        return
+    try:
+        print("@TS " + json.dumps(event, ensure_ascii=False))
+    except Exception:
+        pass
 
 def get_download_root() -> Path:
     load_dotenv()
@@ -112,45 +129,135 @@ if __name__ == "__main__":
         successes = 0
         transcoded = 0
         newly_downloaded_track_ids = []  # Track which files were just downloaded
+        last_error_by_track_id: dict[str, str] = {}
 
-        # 5) Download whatever is still missing
+        # 5) Download whatever is still missing (auto-retry if any remain missing)
         if total:
-            print(f"\n⬇️  Downloading {total} tracks...")
+            # Emit queue events so the UI can show items immediately in Details.
             try:
-                results = download_missing_batch(still_missing, DOWNLOAD_ROOT, aac_kbps=192, progress=True, max_workers=MAX_WORKERS, debug=DEBUG_SEARCH)
-                batch_size = 25  # Commit every 25 files for better performance
-                for idx, r in enumerate(results):
-                    if r and r.ok:
-                        try:
-                            rel = r.final_path.relative_to(DOWNLOAD_ROOT)
-                            attach_file(conn, r.track_id, rel, DOWNLOAD_ROOT)
-                            newly_downloaded_track_ids.append(r.track_id)  # Track new downloads
-                            successes += 1
-                            if r.transcoded:
-                                transcoded += 1
-                        except Exception as e:
-                            print(f"⚠️  Failed to record {r.title}: {e}")
+                cap = 500
+                for i, r in enumerate(still_missing):
+                    if i >= cap:
+                        break
+                    try:
+                        keys = set(r.keys()) if hasattr(r, "keys") else set()
+                    except Exception:
+                        keys = set()
+                    _emit_ts(
+                        {
+                            "type": "queue",
+                            "track_id": r["id"],
+                            "artist": r["artist"] if "artist" in keys else None,
+                            "title": r["name"] if "name" in keys else None,
+                            "cover_url": r["cover_url"] if "cover_url" in keys else None,
+                            "idx": i + 1,
+                            "total": total,
+                        }
+                    )
+                if total > cap:
+                    _emit_ts({"type": "queue_truncated", "shown": cap, "total": total})
+            except Exception:
+                pass
+
+            remaining_rows = list(still_missing)
+            initial_total = int(total)
+            attempt = 1
+
+            while remaining_rows and attempt <= MAX_SYNC_ATTEMPTS:
+                print(f"\n⬇️  Downloading {len(remaining_rows)} tracks... (attempt {attempt}/{MAX_SYNC_ATTEMPTS})")
+                _emit_ts(
+                    {
+                        "type": "retry",
+                        "attempt": attempt,
+                        "max": MAX_SYNC_ATTEMPTS,
+                        "remaining": len(remaining_rows),
+                    }
+                )
+
+                try:
+                    results = download_missing_batch(
+                        remaining_rows,
+                        DOWNLOAD_ROOT,
+                        aac_kbps=192,
+                        progress=True,
+                        max_workers=MAX_WORKERS,
+                        debug=DEBUG_SEARCH,
+                    )
+
+                    batch_size = 25  # Commit every 25 files for better performance
+                    for idx, r in enumerate(results):
+                        if r and r.ok:
+                            try:
+                                rel = r.final_path.relative_to(DOWNLOAD_ROOT)
+                                attach_file(conn, r.track_id, rel, DOWNLOAD_ROOT)
+                                if r.track_id not in newly_downloaded_track_ids:
+                                    newly_downloaded_track_ids.append(r.track_id)
+                                successes += 1
+                                if r.transcoded:
+                                    transcoded += 1
+                            except Exception as e:
+                                print(f"⚠️  Failed to record {r.title}: {e}")
+                                failures.append(r)
+                        elif r:
+                            try:
+                                if r.track_id:
+                                    last_error_by_track_id[str(r.track_id)] = str(r.error or "")
+                            except Exception:
+                                pass
                             failures.append(r)
-                    elif r:
-                        # If a track is consistently not found, mark it as unavailable so
-                        # it no longer blocks playlists as "missing".
+
+                        if (idx + 1) % batch_size == 0 or idx == len(results) - 1:
+                            conn.commit()
+
+                except Exception as e:
+                    print(f"❌ Download batch failed: {e}")
+                    traceback.print_exc()
+
+                # Recompute missing after this attempt.
+                try:
+                    still_missing = get_missing_tracks(conn)
+                    remaining_rows = list(still_missing)
+                except Exception:
+                    remaining_rows = []
+
+                if remaining_rows and attempt < MAX_SYNC_ATTEMPTS:
+                    print(f"🔁 {len(remaining_rows)} track(s) still missing; retrying...")
+                attempt += 1
+
+            print(
+                f"✅ Downloaded {successes}/{initial_total} tracks"
+                + (f" (transcoded: {transcoded})" if transcoded else "")
+            )
+
+            # Final missing report (do NOT fail the run; UI should finish normally)
+            try:
+                final_missing = get_missing_tracks(conn)
+            except Exception:
+                final_missing = []
+
+            if final_missing:
+                _emit_ts(
+                    {
+                        "type": "missing_final",
+                        "count": len(final_missing),
+                        "attempts": MAX_SYNC_ATTEMPTS,
+                    }
+                )
+                print(f"⚠️  {len(final_missing)} track(s) still missing after {MAX_SYNC_ATTEMPTS} attempt(s).")
+
+                # Only mark unavailable for tracks that appear truly not-found.
+                for r in final_missing:
+                    tid = str(r["id"])
+                    err = (last_error_by_track_id.get(tid) or "").strip()
+                    if "no suitable youtube match" in err.lower():
                         try:
-                            err_l = (r.error or "").strip().lower()
-                            if "no suitable youtube match" in err_l:
-                                mark_track_unavailable(conn, r.track_id, reason=r.error)
+                            mark_track_unavailable(conn, tid, reason=err)
                         except Exception:
                             pass
-                        failures.append(r)
-                    
-                    # Batch commit every N files
-                    if (idx + 1) % batch_size == 0 or idx == len(results) - 1:
-                        conn.commit()
-                
-                print(f"✅ Downloaded {successes}/{total} tracks" + (f" (transcoded: {transcoded})" if transcoded else ""))
-            except Exception as e:
-                print(f"❌ Download batch failed: {e}")
-                traceback.print_exc()
-                print("⚠️  Continuing to tagging phase...")
+                try:
+                    conn.commit()
+                except Exception:
+                    pass
 
         # 6) Tag only newly downloaded files with Spotify metadata + cover
         try:

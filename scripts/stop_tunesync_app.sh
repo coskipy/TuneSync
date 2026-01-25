@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PID_FILE="/tmp/lightsync_app.pid"
+PID_FILE="/tmp/tunesync_app.pid"
 
 if [[ -f "$PID_FILE" ]]; then
   pid="$(cat "$PID_FILE" || true)"
@@ -12,6 +12,6 @@ if [[ -f "$PID_FILE" ]]; then
   rm -f "$PID_FILE" || true
 fi
 
-pkill -f -- "-m lightsync_app" 2>/dev/null || true
+pkill -f -- "-m tunesync_app" 2>/dev/null || true
 
-echo "LightSync stopped."
+echo "TuneSync stopped."

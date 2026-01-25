@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LightSync Setup Script
+TuneSync Setup Script
 Automates installation and configuration
 """
 
@@ -174,7 +174,7 @@ def print_completion():
     print_step(6, "Setup complete! 🎉")
     
     print("\n" + "="*60)
-    print("  🎵 LightSync is ready to use!")
+    print("  🎵 TuneSync is ready to use!")
     print("="*60)
     
     print("\n📝 Next steps:")
@@ -186,8 +186,8 @@ def print_completion():
     else:
         print("     source .venv/bin/activate")
     
-    print("\n2. Run the LightSync app:\n")
-    print("     python -m lightsync_app")
+    print("\n2. Run the TuneSync app:\n")
+    print("     python -m tunesync_app")
 
     print("\n   Your browser will open for Spotify authorization on first run.")
     print("\n3. Add playlists from inside the app (Add Playlists).")
@@ -200,7 +200,7 @@ def print_completion():
 
 
 def main():
-    print_header("🎵 LightSync Setup")
+    print_header("🎵 TuneSync Setup")
     
     try:
         check_python_version()

@@ -35,7 +35,7 @@ def export_rekordbox_xml(
     download_root: Path,
     out_xml: Optional[Path] = None,
     alias_map: Optional[Dict[str, str]] = None,
-    product_name: str = "CapSize",
+    product_name: str = "TuneSync",
     product_version: str = "0.1",
 ) -> Path:
     """
@@ -140,7 +140,7 @@ def export_rekordbox_xml(
 
     # Wrap in DJ_PLAYLISTS
     root = ET.Element("DJ_PLAYLISTS", {"Version": "1.0.0"})
-    ET.SubElement(root, "PRODUCT", {"Name": product_name, "Version": product_version, "Company": "CapSize"})
+    ET.SubElement(root, "PRODUCT", {"Name": product_name, "Version": product_version, "Company": "TuneSync"})
     root.append(collection)
     root.append(playlists_root)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 from time import sleep
+import time
 import threading
 import json
 import os
@@ -28,8 +29,21 @@ class SpotifyClient:
     _auth_open_browser: Optional[bool] = None
     _auth_scope: Optional[str] = None
 
-    _KC_SERVICE = "LightSync Spotify Token"
+    _KC_SERVICE = "TuneSync Spotify Token"
     _KC_ACCOUNT = "default"
+
+    @staticmethod
+    def _debug_enabled() -> bool:
+        return (os.getenv("TUNESYNC_DEBUG") or "").strip().lower() in {"1", "true", "yes"}
+
+    @classmethod
+    def _dbg(cls, msg: str) -> None:
+        if not cls._debug_enabled():
+            return
+        try:
+            print(f"[spotify] {msg}", flush=True)
+        except Exception:
+            pass
 
     @classmethod
     def login(cls, scope: str = "playlist-read-private", silent: bool = False) -> spotipy.Spotify:
@@ -37,11 +51,27 @@ class SpotifyClient:
         client_id = (os.getenv("SPOTIPY_CLIENT_ID") or "").strip() or None
         redirect_uri = (os.getenv("SPOTIPY_REDIRECT_URI") or "").strip() or None
 
-        # In the GUI, we want to avoid unexpectedly popping a browser during background actions.
-        open_browser = not bool(silent)
+        # In the GUI subprocess, never trigger an interactive browser/login flow.
+        # If auth is required, fail fast with a clear error instead of hanging.
+        ui_mode = (os.getenv("TUNESYNC_UI") or "").strip() == "1"
+
+        cache_handler = _make_cache_handler()
+        if ui_mode:
+            token = None
+            try:
+                token = cache_handler.get_cached_token()
+            except Exception:
+                token = None
+            if not (isinstance(token, dict) and token.get("refresh_token")):
+                raise RuntimeError(
+                    "Spotify login required. Run this once from Terminal to re-auth and save a refresh token: "
+                    "/Users/pete/Documents/GitHub/LightSync/.venv/bin/python -c \"from spotify_client import SpotifyClient; SpotifyClient.login()\""
+                )
+
+        open_browser = (not bool(silent)) and (not ui_mode)
 
         if cls.sp is None or cls._auth_open_browser != open_browser or cls._auth_scope != scope:
-            cache_handler = _make_cache_handler()
+            cls._dbg(f"init auth ui_mode={ui_mode} open_browser={open_browser} scope={scope}")
             auth = SpotifyPKCE(
                 client_id=client_id,
                 redirect_uri=redirect_uri,
@@ -49,13 +79,13 @@ class SpotifyClient:
                 open_browser=open_browser,
                 cache_handler=cache_handler,
             )
-            cls.sp = spotipy.Spotify(auth_manager=auth)
+            # requests_timeout prevents indefinite hangs on network calls.
+            cls.sp = spotipy.Spotify(auth_manager=auth, requests_timeout=10)
             cls._auth_open_browser = open_browser
             cls._auth_scope = scope
 
-        if not silent:
-            me = cls.sp.current_user()
-            print("✅ Logged in as:", me.get("display_name") or me.get("id"), flush=True)
+        # Intentionally no "Logged in as" call/print here.
+        # current_user() is an extra API call and can itself hang under bad network conditions.
 
         return cls.sp
 
@@ -90,17 +120,30 @@ class SpotifyClient:
         tries = 3
         delay = 1.5
         for i in range(tries):
+            started = time.monotonic()
             try:
                 # Rate limit protection: serialize requests
                 with cls._request_lock:
                     sleep(cls._min_request_delay)
-                    return fn(*args, **kwargs)
+                    out = fn(*args, **kwargs)
+                cls._dbg(f"ok {getattr(fn, '__name__', str(fn))} ({(time.monotonic() - started):.2f}s)")
+                return out
             except SpotifyException as e:
+                cls._dbg(
+                    f"err {getattr(fn, '__name__', str(fn))} http={getattr(e, 'http_status', None)} "
+                    f"try={i + 1}/{tries} ({(time.monotonic() - started):.2f}s)"
+                )
                 if (e.http_status in (429, 500, 502, 503, 504)) and i < tries - 1:
                     backoff = delay * (2 ** i)
                     print(f"  ⏱️  Rate limited (HTTP {e.http_status}), waiting {backoff}s...")
                     sleep(backoff)
                     continue
+                raise
+            except Exception as e:
+                cls._dbg(
+                    f"err {getattr(fn, '__name__', str(fn))} {type(e).__name__}: {e} "
+                    f"try={i + 1}/{tries} ({(time.monotonic() - started):.2f}s)"
+                )
                 raise
 
     # ------------------------
@@ -436,7 +479,7 @@ def _make_cache_handler() -> CacheHandler:
     try:
         from pathlib import Path
 
-        cache_dir = Path.home() / "Library" / "Application Support" / "LightSync"
+        cache_dir = Path.home() / "Library" / "Application Support" / "TuneSync"
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_path = cache_dir / "spotify_token.json"
         return CacheFileHandler(cache_path=str(cache_path))

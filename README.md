@@ -1,4 +1,4 @@
-# 🎵 LightSync
+# 🎵 TuneSync
 
 Automatically sync your Spotify playlists to local files for Rekordbox.
 
@@ -32,25 +32,25 @@ sudo apt-get install ffmpeg
 ### 3. Run Setup Script
 
 ```bash
-git clone https://github.com/coskipy/LightSync.git
-cd LightSync
+git clone https://github.com/coskipy/TuneSync.git
+cd TuneSync
 python3 setup.py
 ```
 
 The setup script will:
 
--   ✅ Check Python version
--   ✅ Check ffmpeg installation
--   ✅ Create virtual environment
--   ✅ Install dependencies
--   ✅ Create `.env` configuration file
--   ✅ Prompt for your Spotify credentials and download path
+- ✅ Check Python version
+- ✅ Check ffmpeg installation
+- ✅ Create virtual environment
+- ✅ Install dependencies
+- ✅ Create `.env` configuration file
+- ✅ Prompt for your Spotify credentials and download path
 
-### 4. Run LightSync
+### 4. Run TuneSync
 
 ```bash
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-python -m lightsync_app
+python -m tunesync_app
 ```
 
 Your browser will open for Spotify authorization on first run. That's it!
@@ -64,9 +64,9 @@ Your browser will open for Spotify authorization on first run. That's it!
 
 ## 🎯 Adding Playlists
 
-Playlists are managed in the app and stored in the SQLite database (`capsize.sqlite3`).
+Playlists are managed in the app and stored in the SQLite database (`TuneSync.sqlite3`).
 
-1. Open the app: `python -m lightsync_app`
+1. Open the app: `python -m tunesync_app`
 2. Go to **Add Playlists**
 3. Select playlists and enable syncing
 
@@ -101,18 +101,18 @@ Just activate the virtual environment and run:
 
 ```bash
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-python -m lightsync_app
+python -m tunesync_app
 ```
 
 It only downloads new/missing tracks - existing files are skipped.
 
 ## 🎯 Features
 
--   **Smart Search**: Finds official uploads using view counts and artist matching
--   **Quality Filters**: Skips remixes, live versions, previews (<60s), radio edits
--   **Multi-Source**: SoundCloud priority, YouTube fallback
--   **Auto-Tagging**: Spotify metadata + album artwork
--   **Fast**: Parallel downloads, smart playlist syncing
+- **Smart Search**: Finds official uploads using view counts and artist matching
+- **Quality Filters**: Skips remixes, live versions, previews (<60s), radio edits
+- **Multi-Source**: SoundCloud priority, YouTube fallback
+- **Auto-Tagging**: Spotify metadata + album artwork
+- **Fast**: Parallel downloads, smart playlist syncing
 
 ## 🛠️ Troubleshooting
 
@@ -125,19 +125,19 @@ brew install ffmpeg  # macOS
 
 **Spotify authentication fails**
 
--   Verify redirect URI is exactly: `http://127.0.0.1:5000/callback`
--   Check credentials in `.env`
+- Verify redirect URI is exactly: `http://127.0.0.1:5000/callback`
+- Check credentials in `.env`
 
 **Wrong song downloaded**
 
--   The improved algorithm heavily favors official uploads with high view counts
--   If wrong, the official version might not be available online
+- The improved algorithm heavily favors official uploads with high view counts
+- If wrong, the official version might not be available online
 
 **Reset everything**
 
 ```bash
 rm -rf /path/to/music/*.m4a
-sqlite3 capsize.sqlite3 "DELETE FROM files; DELETE FROM tracks;"
+sqlite3 TuneSync.sqlite3 "DELETE FROM files; DELETE FROM tracks;"
 python main.py
 ```
 
@@ -147,8 +147,8 @@ If you prefer manual installation:
 
 ```bash
 # Clone repo
-git clone https://github.com/coskipy/LightSync.git
-cd LightSync
+git clone https://github.com/coskipy/TuneSync.git
+cd TuneSync
 
 # Create virtual environment
 python3 -m venv .venv
@@ -164,7 +164,7 @@ cp .env.example .env
 nano .env
 
 # Run
-python -m lightsync_app
+python -m tunesync_app
 ```
 
 ---

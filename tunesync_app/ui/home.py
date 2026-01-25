@@ -39,7 +39,7 @@ from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QInputDialog
 
 
-_DEBUG_IMAGES = os.getenv("LIGHTSYNC_DEBUG_IMAGES", "").strip() in {"1", "true", "TRUE", "yes", "YES"}
+_DEBUG_IMAGES = os.getenv("TUNESYNC_DEBUG_IMAGES", "").strip() in {"1", "true", "TRUE", "yes", "YES"}
 
 
 class DownloadRow(QFrame):
@@ -78,7 +78,7 @@ class DownloadRow(QFrame):
 
         if image_url:
             req = QNetworkRequest(QUrl(image_url))
-            req.setRawHeader(b"User-Agent", b"LightSync")
+            req.setRawHeader(b"User-Agent", b"TuneSync")
             req.setRawHeader(b"Accept", b"image/*")
             try:
                 req.setAttribute(QNetworkRequest.RedirectPolicyAttribute, QNetworkRequest.NoLessSafeRedirectPolicy)
@@ -665,7 +665,7 @@ _GRID_SPACING_PX = 18
 
 
 def _svg_icon(name: str, size: int = 18) -> QIcon:
-    """Load an SVG from lightsync_app/ui/icons and render to a QIcon."""
+    """Load an SVG from tunesync_app/ui/icons and render to a QIcon."""
     try:
         from pathlib import Path
 
@@ -1479,7 +1479,7 @@ class _MissingTrackRow(QFrame):
 
         if cover_url:
             req = QNetworkRequest(QUrl(cover_url))
-            req.setRawHeader(b"User-Agent", b"LightSync")
+            req.setRawHeader(b"User-Agent", b"TuneSync")
             req.setRawHeader(b"Accept", b"image/*")
             try:
                 req.setAttribute(QNetworkRequest.RedirectPolicyAttribute, QNetworkRequest.NoLessSafeRedirectPolicy)
@@ -1594,7 +1594,7 @@ class SelectablePlaylistCard(QFrame):
 
         if image_url:
             req = QNetworkRequest(QUrl(image_url))
-            req.setRawHeader(b"User-Agent", b"LightSync")
+            req.setRawHeader(b"User-Agent", b"TuneSync")
             req.setRawHeader(b"Accept", b"image/*")
             try:
                 req.setAttribute(QNetworkRequest.RedirectPolicyAttribute, QNetworkRequest.NoLessSafeRedirectPolicy)
@@ -1661,7 +1661,7 @@ class SelectablePlaylistCard(QFrame):
 
 
 class AddPlaylistsPage(QWidget):
-    added = Signal()
+    added = Signal(list)
     cancelled = Signal()
 
     def __init__(self, *, parent: QWidget | None = None):
@@ -2042,11 +2042,13 @@ class AddPlaylistsPage(QWidget):
     def _add_confirm(self) -> None:
         to_add: list[tuple[str, str]] = []
         db_rows: list[dict] = []
+        added_ids: list[str] = []
 
         by_id = {p["id"]: p for p in self._all if p.get("id")}
         for pid in sorted(self._selected):
             p = by_id.get(pid) or {}
             to_add.append((pid, p.get("name") or pid))
+            added_ids.append(pid)
             db_rows.append(
                 {
                     "id": pid,
@@ -2072,6 +2074,7 @@ class AddPlaylistsPage(QWidget):
             except Exception:
                 pass
             to_add.append((url_pid, name))
+            added_ids.append(url_pid)
             db_rows.append(
                 {
                     "id": url_pid,
@@ -2106,14 +2109,14 @@ class AddPlaylistsPage(QWidget):
         except Exception:
             pass
 
-        self.added.emit()
+        self.added.emit(added_ids)
         # HomeWindow listens to `added` and navigates back to Library.
 
 
 class HomeWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("LightSync")
+        self.setWindowTitle("TuneSync")
 
         # Load persisted env (DOWNLOAD_ROOT etc.) for the UI.
         try:
@@ -2123,8 +2126,12 @@ class HomeWindow(QMainWindow):
         except Exception:
             pass
 
-        self._settings = QSettings("LightSync", "LightSync")
+        self._settings = QSettings("TuneSync", "TuneSync")
         self._db_load_retry_scheduled = False
+
+        # In-memory promotion of newly-added playlists (cleared on sort change
+        # or when navigating away from Home).
+        self._promoted_playlist_ids: list[str] = []
 
         # Tutorial/onboarding state (shown only when Help is clicked).
         self._tutorial_completed = bool(self._settings.value("tutorial_completed", False) or False)
@@ -2355,6 +2362,11 @@ class HomeWindow(QMainWindow):
 
             def on_triggered():
                 self._sort_choice = value
+                # Any manual sort change cancels "newly added" promotion.
+                try:
+                    self._promoted_playlist_ids = []
+                except Exception:
+                    pass
                 try:
                     self._settings.setValue("sort_choice", value or "")
                 except Exception:
@@ -2606,6 +2618,8 @@ class HomeWindow(QMainWindow):
         s_outer.addWidget(storage_title)
 
         storage_row = QHBoxLayout()
+        storage_row.setContentsMargins(0, 0, 0, 0)
+        storage_row.setSpacing(12)
         storage_lbl = QLabel("Local storage folder")
         storage_lbl.setStyleSheet(f"color: {_MUTED};")
         storage_row.addWidget(storage_lbl, 1)
@@ -2613,7 +2627,11 @@ class HomeWindow(QMainWindow):
         self.storage_path = QLabel("")
         self.storage_path.setStyleSheet("color: #e7eaf0;")
         self.storage_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.storage_path.setWordWrap(True)
+        self.storage_path.setWordWrap(False)
+        try:
+            self.storage_path.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        except Exception:
+            pass
 
         self.browse_btn = QPushButton("Browse")
         self.browse_btn.setFixedHeight(30)
@@ -2622,11 +2640,13 @@ class HomeWindow(QMainWindow):
             "QPushButton:hover { background: white; }"
         )
         self.browse_btn.clicked.connect(self._browse_storage_folder)
+        storage_row.addWidget(self.storage_path, 0, Qt.AlignVCenter)
         storage_row.addWidget(self.browse_btn, 0, Qt.AlignRight)
         s_outer.addLayout(storage_row)
-        s_outer.addWidget(self.storage_path)
 
         size_row = QHBoxLayout()
+        size_row.setContentsMargins(0, 0, 0, 0)
+        size_row.setSpacing(12)
         self.total_size_lbl = QLabel("Total library size")
         self.total_size_lbl.setStyleSheet(f"color: {_MUTED};")
         size_row.addWidget(self.total_size_lbl, 1)
@@ -2636,12 +2656,15 @@ class HomeWindow(QMainWindow):
         size_row.addWidget(self.total_size_val, 0, Qt.AlignRight)
         s_outer.addLayout(size_row)
 
-        self.storage_bar = _StorageBar()
-        s_outer.addWidget(self.storage_bar)
+        # (Removed) storage bar under the total size; it was redundant.
 
         # Accounts
         accounts_title = QLabel("Accounts")
-        accounts_title.setStyleSheet("font-weight: 900; font-size: 16px; margin-top: 12px;")
+        accounts_title.setStyleSheet("font-weight: 900; font-size: 16px;")
+        try:
+            accounts_title.setContentsMargins(0, 0, 0, 0)
+        except Exception:
+            pass
         s_outer.addWidget(accounts_title)
 
         self.spotify_card = QFrame()
@@ -2651,6 +2674,8 @@ class HomeWindow(QMainWindow):
         sp_lay.setSpacing(8)
 
         sp_top = QHBoxLayout()
+        sp_top.setContentsMargins(0, 0, 0, 0)
+        sp_top.setSpacing(8)
         sp_icon = QLabel()
         sp_icon.setFixedSize(16, 16)
         try:
@@ -2703,7 +2728,11 @@ class HomeWindow(QMainWindow):
 
         # Rekordbox
         rekordbox_title = QLabel("Rekordbox")
-        rekordbox_title.setStyleSheet("font-weight: 900; font-size: 16px; margin-top: 12px;")
+        rekordbox_title.setStyleSheet("font-weight: 900; font-size: 16px;")
+        try:
+            rekordbox_title.setContentsMargins(0, 0, 0, 0)
+        except Exception:
+            pass
         s_outer.addWidget(rekordbox_title)
 
         self.rekordbox_card = QFrame()
@@ -2735,6 +2764,34 @@ class HomeWindow(QMainWindow):
         rk_lay.addWidget(rk_desc)
 
         s_outer.addWidget(self.rekordbox_card)
+
+        # Advanced (placed at the bottom, beneath Rekordbox)
+        advanced_title = QLabel("Advanced")
+        advanced_title.setStyleSheet("font-weight: 900; font-size: 16px;")
+        try:
+            advanced_title.setContentsMargins(0, 0, 0, 0)
+        except Exception:
+            pass
+        s_outer.addWidget(advanced_title)
+
+        dbg_row = QHBoxLayout()
+        dbg_row.setContentsMargins(0, 0, 0, 0)
+        dbg_row.setSpacing(12)
+        dbg_lbl = QLabel("Debug mode")
+        dbg_lbl.setStyleSheet(f"color: {_MUTED};")
+        dbg_row.addWidget(dbg_lbl, 1)
+
+        self.debug_toggle = QPushButton("Off")
+        self.debug_toggle.setCheckable(True)
+        self.debug_toggle.setFixedSize(72, 30)
+        self.debug_toggle.setStyleSheet(
+            "QPushButton { background: #2b2f36; color: #a9b0bb; border: 1px solid #2b2f36; border-radius: 15px; font-weight: 900; }"
+            f"QPushButton:checked {{ background: {_BLUE}; color: white; border: 1px solid {_BLUE}; }}"
+        )
+        self.debug_toggle.toggled.connect(self._on_debug_mode_toggled)
+        dbg_row.addWidget(self.debug_toggle, 0, Qt.AlignRight)
+        s_outer.addLayout(dbg_row)
+
         s_outer.addStretch(1)
 
         self.stack.addWidget(self.settings_page)
@@ -2801,6 +2858,12 @@ class HomeWindow(QMainWindow):
         self._tag_total: Optional[int] = None
         self._last_line: str = ""
         self._run_started_at_sql: Optional[str] = None
+        self._phase_text: str = ""
+        # Live sync items for Details panel (queued/downloading/downloaded/failed).
+        self._sync_items: dict[str, dict] = {}
+        self._sync_items_order: list[str] = []
+        self._sync_attempt: int | None = None
+        self._sync_attempt_max: int | None = None
         self._notifications: list[dict] = []
         self._notifications_unread: int = 0
         self._notif_seq: int = 0
@@ -2980,6 +3043,11 @@ class HomeWindow(QMainWindow):
             self._tutorial_refresh()
 
     def _show_settings_page(self) -> None:
+        # Navigating away from Home clears the ephemeral "newly added" pinning.
+        try:
+            self._promoted_playlist_ids = []
+        except Exception:
+            pass
         self.page_title.setText("Settings")
         self.stack.setCurrentWidget(self.settings_page)
         self._refresh_settings()
@@ -3558,6 +3626,10 @@ class HomeWindow(QMainWindow):
     def _refresh_settings(self) -> None:
         self._refresh_storage_stats()
         self._refresh_account_stats()
+        try:
+            self._refresh_debug_toggle_ui()
+        except Exception:
+            pass
 
     def _browse_storage_folder(self) -> None:
         try:
@@ -3573,7 +3645,7 @@ class HomeWindow(QMainWindow):
 
             msg = (
                 "Use this folder as your Download Root?\n\n"
-                "LightSync will NOT modify or overwrite anything in this folder. "
+                "TuneSync will NOT modify or overwrite anything in this folder. "
                 "It will only use it as the location for downloads/rescans.\n\n"
                 f"Selected: {chosen}"
             )
@@ -3634,11 +3706,20 @@ class HomeWindow(QMainWindow):
         from pathlib import Path
 
         root = (os.getenv("DOWNLOAD_ROOT") or "").strip()
-        self.storage_path.setText(root or "(DOWNLOAD_ROOT not set)")
+        full = root or "(DOWNLOAD_ROOT not set)"
+        try:
+            self.storage_path.setToolTip(full)
+        except Exception:
+            pass
+        try:
+            fm = self.storage_path.fontMetrics()
+            self.storage_path.setText(fm.elidedText(full, Qt.ElideMiddle, 420))
+        except Exception:
+            self.storage_path.setText(full)
 
         if not root:
             self.total_size_val.setText("—")
-            self.storage_bar.set_values(0, 0)
+            # storage bar removed
             return
 
         download_root = Path(root)
@@ -3679,7 +3760,7 @@ class HomeWindow(QMainWindow):
                 continue
 
         total = referenced_size + orphan_size
-        self.storage_bar.set_values(referenced_size, orphan_size)
+        # storage bar removed
 
         def fmt(n: int) -> str:
             gb = n / (1024 * 1024 * 1024)
@@ -4032,6 +4113,22 @@ class HomeWindow(QMainWindow):
             items.sort(key=lambda p: int(p.get("track_count") or 0), reverse=True)
         elif sort_choice == "Creator":
             items.sort(key=lambda p: ((p.get("creator") or "").lower(), (p.get("name") or "").lower()))
+
+        # Temporary: newly-added playlists appear at the top until the user
+        # changes sort (or navigates away).
+        if not sort_choice:
+            try:
+                promoted = [pid for pid in (self._promoted_playlist_ids or []) if isinstance(pid, str) and pid]
+            except Exception:
+                promoted = []
+            if promoted:
+                want = set(promoted)
+                promoted_items = [p for p in items if p.get("id") in want]
+                rest = [p for p in items if p.get("id") not in want]
+                # Keep promoted in the exact order recorded.
+                by_id = {p.get("id"): p for p in promoted_items if p.get("id")}
+                ordered_promoted = [by_id[pid] for pid in promoted if pid in by_id]
+                items = ordered_promoted + rest
 
         self._last_rendered_playlists = list(items)
         self._render_playlist_cards(items)
@@ -4386,7 +4483,15 @@ class HomeWindow(QMainWindow):
         else:
             QMessageBox.information(self, "Removed", f"Playlists removed. Deleted {deleted_files} file(s).")
 
-    def _on_playlists_added(self) -> None:
+    def _on_playlists_added(self, added_ids: list[str] | None = None) -> None:
+        # Pin newly-added playlists to the top until the user changes sort
+        # (or navigates away to another page).
+        try:
+            ids = [x for x in (added_ids or []) if isinstance(x, str) and x]
+            # Most recent first.
+            self._promoted_playlist_ids = list(reversed(ids))
+        except Exception:
+            pass
         self._load_cards_from_db()
         self._show_library_page()
         # Tutorial: once playlists are added, resume on the Home flow.
@@ -4400,7 +4505,7 @@ class HomeWindow(QMainWindow):
 
     def _fetch_cover(self, playlist_id: str, url: str) -> None:
         req = QNetworkRequest(QUrl(url))
-        req.setRawHeader(b"User-Agent", b"LightSync")
+        req.setRawHeader(b"User-Agent", b"TuneSync")
         req.setRawHeader(b"Accept", b"image/*")
         try:
             req.setAttribute(QNetworkRequest.RedirectPolicyAttribute, QNetworkRequest.NoLessSafeRedirectPolicy)
@@ -4464,11 +4569,17 @@ class HomeWindow(QMainWindow):
         self._refresh_sync_button_state()
 
         self._reset_run_stats()
+        self._sync_items = {}
+        self._sync_items_order = []
+        self._sync_attempt = None
+        self._sync_attempt_max = None
         self.run_status.setText("Syncing…")
+        if not self._debug_mode_enabled():
+            self._set_phase("Fetching info from Spotify…")
         self._set_progress_indeterminate(True)
         self._update_run_detail()
 
-        self._push_notification("Sync started", kind="info")
+        # No popup for progress; Details pane shows live status.
 
         # Mark the start time in SQLite's CURRENT_TIMESTAMP format (UTC)
         try:
@@ -4493,6 +4604,17 @@ class HomeWindow(QMainWindow):
 
         import sys
 
+        # Enable structured @TS events from the backend so the UI can show
+        # per-track progress and retry behavior as one seamless sync.
+        try:
+            env = [f"{k}={v}" for k, v in os.environ.items()]
+            env.append("TUNESYNC_UI=1")
+            if self._debug_mode_enabled():
+                env.append("TUNESYNC_DEBUG=1")
+            proc.setEnvironment(env)
+        except Exception:
+            pass
+
         proc.setProgram(sys.executable)
         proc.setArguments(["-u", "main.py"])
         proc.setProcessChannelMode(QProcess.MergedChannels)
@@ -4511,7 +4633,11 @@ class HomeWindow(QMainWindow):
             self._set_progress_indeterminate(False)
             self.progress.setRange(0, 1)
             self.progress.setValue(1)
-            self.run_status.setText("Done")
+
+            # Ensure the detail line doesn't get stuck on an in-progress phase.
+            if not self._debug_mode_enabled():
+                self._phase_text = "Finished"
+
             self._update_run_detail(final=True)
             self._load_downloaded_details()
             self._load_cards_from_db()
@@ -4528,9 +4654,17 @@ class HomeWindow(QMainWindow):
                 return
 
             if int(_code or 0) != 0:
+                try:
+                    self.run_status.setText("Sync failed")
+                except Exception:
+                    pass
                 tail = (self._last_line or "").strip()
                 self._push_notification(f"Download failed" + (f": {tail}" if tail else ""), kind="error")
             else:
+                try:
+                    self.run_status.setText("Synced successfully")
+                except Exception:
+                    pass
                 if self._downloaded_ok is not None and int(self._downloaded_ok) > 0:
                     self._push_notification(f"Success: {int(self._downloaded_ok)} songs downloaded", kind="success")
                 else:
@@ -4964,7 +5098,10 @@ class HomeWindow(QMainWindow):
                 total_h = max(1, splitter.height())
                 open_h = min(360, max(220, total_h // 3))
                 splitter.setSizes([open_h, max(1, total_h - open_h)])
-            self._load_downloaded_details()
+            if self._is_sync_running():
+                self._render_sync_details()
+            else:
+                self._load_downloaded_details()
             # Tutorial: once Details is opened, advance to "Back to Settings".
             try:
                 if getattr(self, "_tutorial_active", False) and int(getattr(self, "_tutorial_step", 0) or 0) == 6:
@@ -5051,6 +5188,49 @@ class HomeWindow(QMainWindow):
         self._tag_current = None
         self._tag_total = None
         self._last_line = ""
+        self._phase_text = ""
+
+    def _debug_mode_enabled(self) -> bool:
+        try:
+            v = self._settings.value("debug_mode", False)
+            if isinstance(v, bool):
+                return bool(v)
+            s = str(v or "").strip().lower()
+            return s in {"1", "true", "yes", "on"}
+        except Exception:
+            return False
+
+    def _on_debug_mode_toggled(self, checked: bool) -> None:
+        try:
+            self._settings.setValue("debug_mode", bool(checked))
+        except Exception:
+            pass
+        try:
+            self.debug_toggle.setText("On" if checked else "Off")
+        except Exception:
+            pass
+
+    def _refresh_debug_toggle_ui(self) -> None:
+        try:
+            on = self._debug_mode_enabled()
+            self.debug_toggle.blockSignals(True)
+            self.debug_toggle.setChecked(on)
+            self.debug_toggle.setText("On" if on else "Off")
+        except Exception:
+            pass
+        finally:
+            try:
+                self.debug_toggle.blockSignals(False)
+            except Exception:
+                pass
+
+    def _set_phase(self, text: str) -> None:
+        self._phase_text = text
+        try:
+            if self._is_sync_running():
+                self.run_detail.setText(text)
+        except Exception:
+            pass
 
     def _set_progress_indeterminate(self, on: bool) -> None:
         if on:
@@ -5072,11 +5252,17 @@ class HomeWindow(QMainWindow):
             parts.append(f"Tagging: {self._tag_current}/{self._tag_total}")
 
         msg = " • ".join(parts)
-        if not msg and self._last_line:
-            msg = self._last_line
-        if final and self._last_line:
-            # Keep the last line around in case the run didn't emit all counters.
-            msg = msg or self._last_line
+
+        if self._debug_mode_enabled():
+            if not msg and self._last_line:
+                msg = self._last_line
+            if final and self._last_line:
+                # Keep the last line around in case the run didn't emit all counters.
+                msg = msg or self._last_line
+        else:
+            # In non-debug mode, avoid noisy raw subprocess lines.
+            if not msg and self._phase_text:
+                msg = self._phase_text
         self.run_detail.setText(msg)
 
     def _on_proc_output(self, proc: QProcess) -> None:
@@ -5087,7 +5273,8 @@ class HomeWindow(QMainWindow):
         # main.py and helpers often print progress with carriage returns
         raw = raw.replace("\r", "\n")
         for line in [ln.strip() for ln in raw.splitlines() if ln.strip()]:
-            self._last_line = line
+            if self._debug_mode_enabled():
+                self._last_line = line
             self._parse_line(line)
         self._update_run_detail()
         self._maybe_refresh_downloads()
@@ -5095,11 +5282,179 @@ class HomeWindow(QMainWindow):
     def _maybe_refresh_downloads(self) -> None:
         if not self.details_panel.isVisible():
             return
+        # While syncing, show live items rather than only DB-backed downloads.
+        if self._is_sync_running() and self._sync_items:
+            self._render_sync_details()
+            return
         if not self._run_started_at_sql:
             return
         self._load_downloaded_details()
 
+    def _render_sync_details(self) -> None:
+        self._clear_downloads()
+
+        total = len(self._sync_items_order)
+        show_cap = 200
+        shown = min(total, show_cap)
+
+        if total == 0:
+            self.details_title.setText("Details")
+            empty = QLabel("Waiting for tracks…")
+            empty.setStyleSheet("color: #a9b0bb;")
+            self.downloads_lay.addWidget(empty)
+            return
+
+        if total > show_cap:
+            self.details_title.setText(f"Sync items ({shown} of {total})")
+        else:
+            self.details_title.setText(f"Sync items ({total})")
+
+        for tid in self._sync_items_order[:show_cap]:
+            it = self._sync_items.get(tid) or {}
+            title = it.get("title") or tid
+            subtitle = it.get("status") or "Queued"
+            self.downloads_lay.addWidget(
+                DownloadRow(
+                    title=title,
+                    subtitle=subtitle,
+                    image_url=it.get("cover_url"),
+                    net=self._net,
+                )
+            )
+
+        if total > show_cap:
+            more = QLabel(f"… and {total - show_cap} more")
+            more.setStyleSheet("color: #a9b0bb;")
+            self.downloads_lay.addWidget(more)
+
+        self.downloads_lay.addStretch(1)
+
     def _parse_line(self, line: str) -> None:
+        # Hide noisy backend debug output unless Debug mode is enabled.
+        if not self._debug_mode_enabled():
+            if line.startswith("[sync]") or line.startswith("[spotify]"):
+                return
+
+        # Phase mapping (friendly UI text when Debug mode is off).
+        if not self._debug_mode_enabled():
+            low = line.lower()
+            if "syncing" in low and "spotify" in low:
+                self._set_phase("Fetching info from Spotify…")
+            elif "searching" in low or "tier" in low:
+                self._set_phase("Searching internet for songs…")
+            elif "downloading" in low:
+                self._set_phase("Downloading…")
+            elif "tagging" in low:
+                self._set_phase("Tagging…")
+            elif "export" in low:
+                self._set_phase("Exporting…")
+
+        if line.startswith("@TS "):
+            try:
+                payload = json.loads(line[4:].strip())
+            except Exception:
+                return
+
+            t = str(payload.get("type") or "")
+
+            if t == "retry":
+                try:
+                    self._sync_attempt = int(payload.get("attempt") or 0) or None
+                except Exception:
+                    self._sync_attempt = None
+                try:
+                    self._sync_attempt_max = int(payload.get("max") or 0) or None
+                except Exception:
+                    self._sync_attempt_max = None
+
+                remaining = payload.get("remaining")
+                if remaining is not None:
+                    try:
+                        remaining_i = int(remaining)
+                        self._download_total = remaining_i
+                        self._downloaded_ok = 0
+                        self.progress.setRange(0, max(1, remaining_i))
+                        self.progress.setValue(0)
+                    except Exception:
+                        pass
+
+                try:
+                    if self._sync_attempt and self._sync_attempt > 1 and self._sync_attempt_max:
+                        self.run_status.setText(f"Syncing… (retry {self._sync_attempt}/{self._sync_attempt_max})")
+                except Exception:
+                    pass
+                return
+
+            if t == "queue":
+                tid = str(payload.get("track_id") or "").strip()
+                if not tid:
+                    return
+                artist = str(payload.get("artist") or "").strip()
+                title = str(payload.get("title") or "").strip()
+                full_title = f"{artist} — {title}" if artist and title else (title or artist or tid)
+
+                if tid not in self._sync_items:
+                    self._sync_items_order.append(tid)
+                self._sync_items[tid] = {
+                    "title": full_title,
+                    "cover_url": payload.get("cover_url"),
+                    "status": "Queued",
+                }
+                if self.details_panel.isVisible() and self._is_sync_running():
+                    self._render_sync_details()
+                return
+
+            if t == "queue_truncated":
+                # No popup; Details already reflects the truncation.
+                return
+
+            if t == "download_start":
+                tid = str(payload.get("track_id") or "").strip()
+                if not tid:
+                    return
+                if not self._debug_mode_enabled():
+                    self._set_phase("Downloading…")
+                it = self._sync_items.get(tid) or {}
+                it["status"] = "Downloading…"
+                self._sync_items[tid] = it
+                if self.details_panel.isVisible() and self._is_sync_running():
+                    self._render_sync_details()
+                return
+
+            if t == "download_done":
+                tid = str(payload.get("track_id") or "").strip()
+                if not tid:
+                    return
+
+                ok = bool(payload.get("ok"))
+                err = str(payload.get("error") or "").strip()
+                it = self._sync_items.get(tid) or {}
+                it["status"] = "Downloaded" if ok else (f"Failed: {err}" if err else "Failed")
+                self._sync_items[tid] = it
+
+                # Update determinate progress for this attempt.
+                try:
+                    completed = int(payload.get("completed") or 0)
+                    total = int(payload.get("total") or 0)
+                    if total > 0:
+                        self.progress.setRange(0, total)
+                        self.progress.setValue(min(completed, total))
+                        self._download_total = total
+                        if ok:
+                            self._downloaded_ok = int(self._downloaded_ok or 0) + 1
+                except Exception:
+                    pass
+
+                if self.details_panel.isVisible() and self._is_sync_running():
+                    self._render_sync_details()
+                return
+
+            if t == "missing_final":
+                # No popup; missing items remain visible in the library.
+                return
+
+            return
+
         # Examples we want to parse:
         # "🔄 Syncing 74 playlists from Spotify..."
         # "📊 Status: 9 to download"
@@ -5123,9 +5478,9 @@ class HomeWindow(QMainWindow):
             self._download_total = int(m.group(1))
             if self._missing_total is None:
                 self._missing_total = self._download_total
-            # We don't have per-track download progress from main.py reliably,
-            # so keep the bar indeterminate during download.
-            self._set_progress_indeterminate(True)
+            # If we don't have structured per-track events, keep the bar indeterminate.
+            if self._sync_attempt is None:
+                self._set_progress_indeterminate(True)
             return
 
         m = re.search(r"Downloaded\s+(\d+)/(\d+)\s+tracks", line, re.IGNORECASE)

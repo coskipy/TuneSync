@@ -3,12 +3,12 @@ from __future__ import annotations
 import sys
 from PySide6.QtWidgets import QApplication
 
-from lightsync_app.ui.home import HomeWindow
+from tunesync_app.ui.home import HomeWindow
 
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("LightSync")
+    app.setApplicationName("TuneSync")
 
     # Ensure DB schema exists before the UI queries it.
     try:

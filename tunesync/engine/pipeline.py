@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
 
-from lightsync.util.events import Event, Phase
+from tunesync.util.events import Event, Phase
 
 
 EventSink = Callable[[Event], None]
@@ -22,7 +22,7 @@ def run_sync(
     ignore_dirs: Optional[set[str]] = None,
     event_sink: Optional[EventSink] = None,
 ) -> dict:
-    """Run the existing LightSync pipeline with optional event emission.
+    """Run the existing TuneSync pipeline with optional event emission.
 
     This is intentionally a thin wrapper around the current flat modules so we
     can iterate on UI without a risky refactor.
