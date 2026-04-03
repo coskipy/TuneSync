@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QMenu,
+    QFileDialog,
     QPushButton,
     QProgressBar,
     QScrollArea,
@@ -664,13 +665,25 @@ _TILE_PX = 170
 _GRID_SPACING_PX = 18
 
 
+def _ui_asset_path(*parts: str):
+    """Resolve a path under tunesync_app/ui for dev + PyInstaller builds."""
+    try:
+        import sys
+        from pathlib import Path
+
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return (Path(str(meipass)).resolve() / "tunesync_app" / "ui" / Path(*parts)).resolve()
+        return (Path(__file__).resolve().parent / Path(*parts)).resolve()
+    except Exception:
+        return None
+
+
 def _svg_icon(name: str, size: int = 18) -> QIcon:
     """Load an SVG from tunesync_app/ui/icons and render to a QIcon."""
     try:
-        from pathlib import Path
-
-        p = Path(__file__).resolve().parent / "icons" / name
-        if not p.exists():
+        p = _ui_asset_path("icons", name)
+        if not p or (not p.exists()):
             return QIcon()
 
         # Render at device pixel ratio so SVGs stay crisp on HiDPI.
@@ -1313,7 +1326,15 @@ class _SpotifyAuthWorker(QObject):
         try:
             from spotify_client import SpotifyClient
 
-            sp = SpotifyClient.login(scope=self._scope, silent=False)
+            # Fully automatic PKCE flow:
+            # - starts a loopback HTTP server on the redirect URI's port
+            # - opens the browser to Spotify auth
+            # - captures the redirect automatically
+            auth = SpotifyClient.create_pkce_auth(scope=self._scope, open_browser=True)
+            auth.get_access_token(check_cache=False)
+
+            import spotipy
+            sp = spotipy.Spotify(auth_manager=auth, requests_timeout=10)
             me = sp.current_user() or {}
             who = (me.get("display_name") or me.get("id") or "Spotify")
             self.done.emit(str(who))
@@ -2039,6 +2060,11 @@ class AddPlaylistsPage(QWidget):
             return token.split(":")[-1]
         return token
 
+    @staticmethod
+    def _is_valid_playlist_id(playlist_id: str) -> bool:
+        # Spotify playlist IDs are base62 and typically 22 chars.
+        return bool(re.fullmatch(r"[A-Za-z0-9]{22}", (playlist_id or "").strip()))
+
     def _add_confirm(self) -> None:
         to_add: list[tuple[str, str]] = []
         db_rows: list[dict] = []
@@ -2059,31 +2085,65 @@ class AddPlaylistsPage(QWidget):
                 }
             )
 
-        url_pid = self._extract_playlist_id(self.url_in.text() or "")
-        if url_pid:
-            name = url_pid
-            creator = None
-            image_url = None
-            try:
-                from spotify_client import SpotifyClient
-
-                meta = SpotifyClient.get_playlist_metadata(url_pid, silent=True)
-                name = meta.get("name") or name
-                creator = meta.get("creator")
-                image_url = meta.get("image_url")
-            except Exception:
-                pass
-            to_add.append((url_pid, name))
-            added_ids.append(url_pid)
-            db_rows.append(
-                {
-                    "id": url_pid,
-                    "name": name,
-                    "creator": creator,
-                    "image_url": image_url,
-                    "snapshot_id": None,
-                }
+        raw_url = (self.url_in.text() or "").strip()
+        url_pid = self._extract_playlist_id(raw_url)
+        if raw_url and not url_pid:
+            QMessageBox.warning(
+                self,
+                "Invalid playlist URL",
+                "Paste a Spotify playlist URL, URI, or playlist ID.",
             )
+            return
+
+        if url_pid:
+            if not self._is_valid_playlist_id(url_pid):
+                QMessageBox.warning(
+                    self,
+                    "Invalid playlist ID",
+                    "That does not look like a valid Spotify playlist ID.",
+                )
+                return
+
+            if url_pid in added_ids:
+                # Already selected in the Spotify list above.
+                pass
+            else:
+                name = None
+                creator = None
+                image_url = None
+                meta_error = ""
+                try:
+                    from spotify_client import SpotifyClient
+
+                    meta = SpotifyClient.get_playlist_metadata(url_pid, silent=True)
+                    name = (meta.get("name") or "").strip()
+                    creator = meta.get("creator")
+                    image_url = meta.get("image_url")
+                except Exception as e:
+                    meta_error = str(e)
+
+                if not name:
+                    detail = f"\n\nDetails: {meta_error}" if meta_error else ""
+                    QMessageBox.warning(
+                        self,
+                        "Could not load playlist",
+                        "TuneSync could not fetch that playlist from Spotify.\n\n"
+                        "Sign in to Spotify in Settings and verify the playlist URL is correct."
+                        f"{detail}",
+                    )
+                    return
+
+                to_add.append((url_pid, name))
+                added_ids.append(url_pid)
+                db_rows.append(
+                    {
+                        "id": url_pid,
+                        "name": name,
+                        "creator": creator,
+                        "image_url": image_url,
+                        "snapshot_id": None,
+                    }
+                )
 
         if not to_add:
             return
@@ -2148,6 +2208,16 @@ class HomeWindow(QMainWindow):
                     os.environ["DOWNLOAD_ROOT"] = saved_root
         except Exception:
             pass
+
+        # If TUNESYNC_DB_PATH isn't set in the environment, fall back to saved setting.
+        # This matters for packaged builds where the default DB location differs.
+        try:
+            if not (os.getenv("TUNESYNC_DB_PATH") or "").strip():
+                saved_db = str(self._settings.value("db_path", "") or "").strip()
+                if saved_db:
+                    os.environ["TUNESYNC_DB_PATH"] = saved_db
+        except Exception:
+            pass
         # Resizable window. Default size is tuned for a good first impression,
         # but allow resizing and reflow the tile grid as width changes.
         outer_lr = 26 * 2
@@ -2165,6 +2235,7 @@ class HomeWindow(QMainWindow):
 
         # Top bar (persistent across screens)
         top = QHBoxLayout()
+
         self.page_title = QLabel("Synced Library")
         ft = QFont()
         ft.setPointSize(22)
@@ -2644,6 +2715,34 @@ class HomeWindow(QMainWindow):
         storage_row.addWidget(self.browse_btn, 0, Qt.AlignRight)
         s_outer.addLayout(storage_row)
 
+        # Database
+        db_row = QHBoxLayout()
+        db_row.setContentsMargins(0, 0, 0, 0)
+        db_row.setSpacing(12)
+        db_lbl = QLabel("Database file")
+        db_lbl.setStyleSheet(f"color: {_MUTED};")
+        db_row.addWidget(db_lbl, 1)
+
+        self.db_path = QLabel("")
+        self.db_path.setStyleSheet("color: #e7eaf0;")
+        self.db_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.db_path.setWordWrap(False)
+        try:
+            self.db_path.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        except Exception:
+            pass
+
+        self.db_browse_btn = QPushButton("Browse")
+        self.db_browse_btn.setFixedHeight(30)
+        self.db_browse_btn.setStyleSheet(
+            "QPushButton { background: #e7eaf0; color: #111; border: none; border-radius: 10px; padding: 0 12px; font-weight: 800; }"
+            "QPushButton:hover { background: white; }"
+        )
+        self.db_browse_btn.clicked.connect(self._browse_db_file)
+        db_row.addWidget(self.db_path, 0, Qt.AlignVCenter)
+        db_row.addWidget(self.db_browse_btn, 0, Qt.AlignRight)
+        s_outer.addLayout(db_row)
+
         size_row = QHBoxLayout()
         size_row.setContentsMargins(0, 0, 0, 0)
         size_row.setSpacing(12)
@@ -2799,12 +2898,11 @@ class HomeWindow(QMainWindow):
         # Rekordbox setup guide carousel
         try:
             from pathlib import Path
-            images_dir = Path(__file__).resolve().parent / "images"
-            image_paths = [
-                str(images_dir / "step1.png"),
-                str(images_dir / "step2.png"),
-                str(images_dir / "step3.png"),
-            ]
+            image_paths: list[str] = []
+            for n in ("step1.png", "step2.png", "step3.png"):
+                p = _ui_asset_path("images", n)
+                if p is not None:
+                    image_paths.append(str(p))
             self._rekordbox_carousel = _ImageCarouselPopover(image_paths=image_paths, parent=self)
         except Exception:
             self._rekordbox_carousel = None
@@ -3625,11 +3723,109 @@ class HomeWindow(QMainWindow):
 
     def _refresh_settings(self) -> None:
         self._refresh_storage_stats()
+        try:
+            self._refresh_db_stats()
+        except Exception:
+            pass
         self._refresh_account_stats()
         try:
             self._refresh_debug_toggle_ui()
         except Exception:
             pass
+
+    def _browse_db_file(self) -> None:
+        try:
+            current = (os.getenv("TUNESYNC_DB_PATH") or "").strip()
+            start_dir = ""
+            try:
+                from pathlib import Path
+
+                if current:
+                    start_dir = str(Path(current).expanduser().resolve().parent)
+            except Exception:
+                start_dir = ""
+
+            chosen, _filter = QFileDialog.getOpenFileName(
+                self,
+                "Select TuneSync database",
+                start_dir,
+                "SQLite DB (*.sqlite3 *.sqlite *.db);;All files (*)",
+            )
+            if not chosen:
+                return
+
+            msg = (
+                "Use this database file?\n\n"
+                "TuneSync will read/write playlists and track state from this file. "
+                "If you select your existing DB, your playlists should appear immediately.\n\n"
+                f"Selected: {chosen}"
+            )
+            btn = QMessageBox.question(self, "Set Database File", msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if btn != QMessageBox.Yes:
+                return
+
+            os.environ["TUNESYNC_DB_PATH"] = chosen
+            try:
+                self._settings.setValue("db_path", chosen)
+            except Exception:
+                pass
+
+            # Persist to a local .env file for the CLI pipeline.
+            try:
+                from pathlib import Path
+
+                env_path = Path(".env")
+                lines = env_path.read_text().splitlines() if env_path.exists() else []
+                out: list[str] = []
+                wrote = False
+                for line in lines:
+                    if line.strip().startswith("TUNESYNC_DB_PATH="):
+                        out.append(f"TUNESYNC_DB_PATH={chosen}")
+                        wrote = True
+                    else:
+                        out.append(line)
+                if not wrote:
+                    out.append(f"TUNESYNC_DB_PATH={chosen}")
+                env_path.write_text("\n".join(out).rstrip() + "\n")
+            except Exception:
+                pass
+
+            # Ensure schema exists and reload UI from the chosen DB.
+            try:
+                from db import init_db
+
+                init_db()
+            except Exception:
+                pass
+            try:
+                self._load_downloaded_details()
+            except Exception:
+                pass
+            try:
+                self._load_cards_from_db()
+            except Exception:
+                pass
+        except Exception:
+            return
+        self._refresh_db_stats()
+
+    def _refresh_db_stats(self) -> None:
+        try:
+            from db import get_db_path
+
+            full = str(get_db_path())
+        except Exception:
+            full = (os.getenv("TUNESYNC_DB_PATH") or "").strip() or "(default)"
+
+        try:
+            self.db_path.setToolTip(full)
+        except Exception:
+            pass
+        try:
+            fm = self.db_path.fontMetrics()
+            self.db_path.setText(fm.elidedText(full, Qt.ElideMiddle, 420))
+        except Exception:
+            self.db_path.setText(full)
 
     def _browse_storage_folder(self) -> None:
         try:
@@ -4540,7 +4736,9 @@ class HomeWindow(QMainWindow):
         rep.finished.connect(finished)
 
     def _start_sync(self) -> None:
-        # Run existing main.py in the background so we reuse the current pipeline.
+        # Spawn a subprocess that runs the sync pipeline and streams progress to stdout.
+        # In dev: `python -u -m tunesync_app --sync-worker`
+        # In packaged app: `<TuneSync> --sync-worker`
         if self._sync_proc is not None and self._sync_proc.state() != QProcess.NotRunning:
             return
 
@@ -4615,8 +4813,12 @@ class HomeWindow(QMainWindow):
         except Exception:
             pass
 
+        is_frozen = bool(getattr(sys, "frozen", False))
         proc.setProgram(sys.executable)
-        proc.setArguments(["-u", "main.py"])
+        if is_frozen:
+            proc.setArguments(["--sync-worker"])
+        else:
+            proc.setArguments(["-u", "-m", "tunesync_app", "--sync-worker"])
         proc.setProcessChannelMode(QProcess.MergedChannels)
 
         proc.readyReadStandardOutput.connect(lambda: self._on_proc_output(proc))
@@ -5121,7 +5323,7 @@ class HomeWindow(QMainWindow):
             item = self.downloads_lay.takeAt(0)
             w = item.widget()
             if w is not None:
-                w.setParent(None)
+                w.deleteLater()
 
     def _load_downloaded_details(self) -> None:
         self._clear_downloads()

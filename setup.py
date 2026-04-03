@@ -156,7 +156,7 @@ def create_env_file():
     env_content = f"""# Spotify API Credentials
 SPOTIPY_CLIENT_ID={client_id}
 SPOTIPY_CLIENT_SECRET={client_secret}
-SPOTIPY_REDIRECT_URI=http://127.0.0.1:5000/callback
+SPOTIPY_REDIRECT_URI=http://127.0.0.1:8765/callback
 
 # Download Location
 DOWNLOAD_ROOT={download_path}

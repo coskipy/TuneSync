@@ -8,6 +8,8 @@ import threading
 import json
 import os
 import subprocess
+import sys
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 import spotipy
@@ -32,9 +34,125 @@ class SpotifyClient:
     _KC_SERVICE = "TuneSync Spotify Token"
     _KC_ACCOUNT = "default"
 
+    # PKCE does not require a client secret; a client ID + redirect URI are enough.
+    # These defaults make the packaged app work even when it cannot see the repo-local .env.
+    _DEFAULT_CLIENT_ID = "cde55a79f546483bad4e30ec92c7c45b"
+    # NOTE: 5000 is commonly occupied on macOS (e.g. Control Center), so prefer a higher port.
+    _DEFAULT_REDIRECT_URI = "http://127.0.0.1:8765/callback"
+    _LEGACY_REDIRECT_URI = "http://127.0.0.1:5000/callback"
+    _REDIRECT_CANDIDATES = (
+        _DEFAULT_REDIRECT_URI,
+        _LEGACY_REDIRECT_URI,
+    )
+
     @staticmethod
     def _debug_enabled() -> bool:
         return (os.getenv("TUNESYNC_DEBUG") or "").strip().lower() in {"1", "true", "yes"}
+
+    @staticmethod
+    def _default_app_data_dir() -> "Path":
+        from pathlib import Path
+        import sys
+
+        try:
+            if sys.platform == "darwin":
+                return (Path.home() / "Library" / "Application Support" / "TuneSync")
+        except Exception:
+            pass
+        return Path.home() / ".tunesync"
+
+    @classmethod
+    def _load_env(cls) -> None:
+        """Load configuration from likely locations (dev + packaged)."""
+        try:
+            from pathlib import Path
+
+            # Packaged-friendly location.
+            app_env = cls._default_app_data_dir() / ".env"
+            if app_env.exists():
+                load_dotenv(dotenv_path=str(app_env), override=False)
+
+            # Dev-friendly location (repo root / current working directory).
+            cwd_env = Path(".env")
+            if cwd_env.exists():
+                load_dotenv(dotenv_path=str(cwd_env), override=False)
+        except Exception:
+            try:
+                load_dotenv(override=False)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _is_port_in_use(port: int) -> bool:
+        import socket
+
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                return s.connect_ex(("127.0.0.1", int(port))) == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _extract_port(redirect_uri: str) -> Optional[int]:
+        try:
+            parsed = urlparse(redirect_uri)
+            return int(parsed.port) if parsed.port is not None else None
+        except Exception:
+            return None
+
+    @classmethod
+    def _pick_available_redirect_uri(cls, preferred_uri: str) -> str:
+        ordered: List[str] = []
+        for candidate in [preferred_uri, *cls._REDIRECT_CANDIDATES]:
+            c = (candidate or "").strip()
+            if c and c not in ordered:
+                ordered.append(c)
+
+        for candidate in ordered:
+            port = cls._extract_port(candidate)
+            if port is None:
+                return candidate
+            if not cls._is_port_in_use(port):
+                return candidate
+
+        return preferred_uri
+
+    @classmethod
+    def _normalize_redirect_uri(cls, redirect_uri: str | None) -> str:
+        uri = (redirect_uri or "").strip()
+        if not uri:
+            uri = cls._DEFAULT_REDIRECT_URI
+
+        picked = cls._pick_available_redirect_uri(uri)
+        if picked != uri:
+            cls._dbg(
+                f"redirect port busy for {uri}; using {picked} instead"
+            )
+        return picked
+
+    @classmethod
+    def _patch_auth_opener_if_needed(cls, auth: SpotifyPKCE, *, open_browser: bool) -> None:
+        # On macOS frozen apps, `webbrowser.open()` can silently return False and do nothing.
+        # Spotipy doesn't check the return value, so override its opener to use `/usr/bin/open`.
+        try:
+            is_frozen = bool(getattr(sys, "frozen", False))
+            if open_browser and sys.platform == "darwin" and is_frozen:
+                def _open_auth_url(state=None):
+                    url = auth.get_authorize_url(state)
+                    try:
+                        subprocess.Popen(["/usr/bin/open", url])
+                    except Exception:
+                        try:
+                            import webbrowser
+
+                            webbrowser.open(url)
+                        except Exception:
+                            pass
+
+                auth._open_auth_url = _open_auth_url  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
     @classmethod
     def _dbg(cls, msg: str) -> None:
@@ -47,9 +165,16 @@ class SpotifyClient:
 
     @classmethod
     def login(cls, scope: str = "playlist-read-private", silent: bool = False) -> spotipy.Spotify:
-        load_dotenv()
+        cls._load_env()
         client_id = (os.getenv("SPOTIPY_CLIENT_ID") or "").strip() or None
-        redirect_uri = (os.getenv("SPOTIPY_REDIRECT_URI") or "").strip() or None
+        redirect_uri = cls._normalize_redirect_uri(os.getenv("SPOTIPY_REDIRECT_URI"))
+
+        if not client_id:
+            client_id = cls._DEFAULT_CLIENT_ID
+        if not client_id or not redirect_uri:
+            raise RuntimeError(
+                "Spotify is not configured. Missing SPOTIPY_CLIENT_ID or SPOTIPY_REDIRECT_URI."
+            )
 
         # In the GUI subprocess, never trigger an interactive browser/login flow.
         # If auth is required, fail fast with a clear error instead of hanging.
@@ -64,8 +189,8 @@ class SpotifyClient:
                 token = None
             if not (isinstance(token, dict) and token.get("refresh_token")):
                 raise RuntimeError(
-                    "Spotify login required. Run this once from Terminal to re-auth and save a refresh token: "
-                    "/Users/pete/Documents/GitHub/LightSync/.venv/bin/python -c \"from spotify_client import SpotifyClient; SpotifyClient.login()\""
+                    "Spotify login required. In TuneSync, click 'Sign in' to Spotify in Settings to authorize once, "
+                    "then retry."
                 )
 
         open_browser = (not bool(silent)) and (not ui_mode)
@@ -79,6 +204,9 @@ class SpotifyClient:
                 open_browser=open_browser,
                 cache_handler=cache_handler,
             )
+
+            cls._patch_auth_opener_if_needed(auth, open_browser=open_browser)
+
             # requests_timeout prevents indefinite hangs on network calls.
             cls.sp = spotipy.Spotify(auth_manager=auth, requests_timeout=10)
             cls._auth_open_browser = open_browser
@@ -90,9 +218,38 @@ class SpotifyClient:
         return cls.sp
 
     @classmethod
+    def create_pkce_auth(cls, *, scope: str, open_browser: bool) -> SpotifyPKCE:
+        """Create a SpotifyPKCE auth manager with our env/default handling.
+
+        This is used by the GUI manual sign-in flow (open in browser + paste redirect URL),
+        and by the normal `login()` path.
+        """
+        cls._load_env()
+        client_id = (os.getenv("SPOTIPY_CLIENT_ID") or "").strip() or None
+        redirect_uri = cls._normalize_redirect_uri(os.getenv("SPOTIPY_REDIRECT_URI"))
+
+        if not client_id:
+            client_id = cls._DEFAULT_CLIENT_ID
+        if not client_id or not redirect_uri:
+            raise RuntimeError(
+                "Spotify is not configured. Missing SPOTIPY_CLIENT_ID or SPOTIPY_REDIRECT_URI."
+            )
+
+        cache_handler = _make_cache_handler()
+        auth = SpotifyPKCE(
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            scope=scope,
+            open_browser=open_browser,
+            cache_handler=cache_handler,
+        )
+        cls._patch_auth_opener_if_needed(auth, open_browser=open_browser)
+        return auth
+
+    @classmethod
     def has_cached_token(cls) -> bool:
         try:
-            load_dotenv()
+            cls._load_env()
             handler = _make_cache_handler()
             token = handler.get_cached_token()
             return bool(token and isinstance(token, dict))
@@ -468,20 +625,82 @@ class _KeychainCacheHandler(CacheHandler):
             pass
 
 
-def _make_cache_handler() -> CacheHandler:
-    # Prefer macOS Keychain (no extra Python deps). Fallback to a local cache file.
-    try:
-        if os.name == "posix" and os.path.exists("/usr/bin/security"):
-            return _KeychainCacheHandler(service=SpotifyClient._KC_SERVICE, account=SpotifyClient._KC_ACCOUNT)
-    except Exception:
-        pass
+class _LayeredCacheHandler(CacheHandler):
+    """Use keychain when possible but always keep a file fallback."""
 
+    def __init__(self, *, primary: CacheHandler, fallback: CacheHandler):
+        self._primary = primary
+        self._fallback = fallback
+
+    @staticmethod
+    def _has_token_payload(token_info) -> bool:
+        return bool(
+            isinstance(token_info, dict)
+            and (token_info.get("refresh_token") or token_info.get("access_token"))
+        )
+
+    def get_cached_token(self):
+        token = None
+        try:
+            token = self._primary.get_cached_token()
+        except Exception:
+            token = None
+        if self._has_token_payload(token):
+            return token
+
+        try:
+            token = self._fallback.get_cached_token()
+        except Exception:
+            token = None
+        return token if self._has_token_payload(token) else None
+
+    def save_token_to_cache(self, token_info):
+        try:
+            self._primary.save_token_to_cache(token_info)
+        except Exception:
+            pass
+        try:
+            self._fallback.save_token_to_cache(token_info)
+        except Exception:
+            pass
+
+    def delete(self) -> None:
+        try:
+            if hasattr(self._primary, "delete"):
+                self._primary.delete()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            if hasattr(self._fallback, "delete"):
+                self._fallback.delete()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
+def _make_file_cache_handler() -> CacheHandler:
     try:
         from pathlib import Path
 
-        cache_dir = Path.home() / "Library" / "Application Support" / "TuneSync"
+        cache_dir = SpotifyClient._default_app_data_dir()
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_path = cache_dir / "spotify_token.json"
         return CacheFileHandler(cache_path=str(cache_path))
     except Exception:
         return CacheFileHandler(cache_path=".spotify_token.json")
+
+
+def _make_cache_handler() -> CacheHandler:
+    # Prefer macOS Keychain, but always keep a local cache fallback.
+    file_handler = _make_file_cache_handler()
+
+    try:
+        if os.name == "posix" and os.path.exists("/usr/bin/security"):
+            keychain_handler = _KeychainCacheHandler(
+                service=SpotifyClient._KC_SERVICE,
+                account=SpotifyClient._KC_ACCOUNT,
+            )
+            return _LayeredCacheHandler(primary=keychain_handler, fallback=file_handler)
+    except Exception:
+        pass
+
+    return file_handler

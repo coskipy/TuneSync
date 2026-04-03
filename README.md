@@ -26,7 +26,7 @@ sudo apt-get install ffmpeg
 
 1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
 2. Create a new app
-3. Add redirect URI: `http://127.0.0.1:5000/callback`
+3. Add redirect URI: `http://127.0.0.1:8765/callback`
 4. Copy your **Client ID** and **Client Secret**
 
 ### 3. Run Setup Script
@@ -80,7 +80,7 @@ Edit `.env` to change settings:
 # Spotify API
 SPOTIPY_CLIENT_ID=your_client_id
 SPOTIPY_CLIENT_SECRET=your_client_secret
-SPOTIPY_REDIRECT_URI=http://127.0.0.1:5000/callback
+SPOTIPY_REDIRECT_URI=http://127.0.0.1:8765/callback
 
 # Where to save music
 DOWNLOAD_ROOT=/path/to/your/music/folder
@@ -125,7 +125,7 @@ brew install ffmpeg  # macOS
 
 **Spotify authentication fails**
 
-- Verify redirect URI is exactly: `http://127.0.0.1:5000/callback`
+- Verify redirect URI is exactly: `http://127.0.0.1:8765/callback`
 - Check credentials in `.env`
 
 **Wrong song downloaded**

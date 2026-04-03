@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import os
 import json
+import sys
 import subprocess
 import shutil
 import time
@@ -148,6 +149,35 @@ def _human_time(sec: Optional[float]) -> str:
     m, s = divmod(sec, 60)
     h, m = divmod(m, 60)
     return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:d}:{s:02d}"
+
+
+def _track_id_short(track_id: str) -> str:
+    return (track_id or "")[:8]
+
+
+def _track_marker(track_id: str) -> str:
+    return f"[{_track_id_short(track_id)}]"
+
+
+def _find_downloaded_file_by_marker(
+    out_root: Path,
+    *,
+    track_id: str,
+    exts: tuple[str, ...] = ("m4a", "mp3", "opus", "webm", "aac", "mp4", "flac", "wav"),
+) -> Optional[Path]:
+    """Find a downloaded file for this track by requiring its marker in filename.
+
+    Important: use a literal substring glob for track id; do NOT wrap it in [] because
+    that creates a character class and can match unrelated files.
+    """
+    marker = _track_marker(track_id)
+    track_short = _track_id_short(track_id)
+    for audio_ext in exts:
+        matches = list(out_root.glob(f"*{track_short}*.{audio_ext}"))
+        candidates = [m for m in matches if marker in m.name and m.is_file()]
+        if candidates:
+            return max(candidates, key=lambda p: p.stat().st_mtime)
+    return None
 
 
 def _safe_duration_seconds(path: Path) -> Optional[float]:
@@ -555,13 +585,83 @@ def _search_best(artist: str, title: str, duration_ms: Optional[int], release_da
 # Download core (+ progress)
 # ---------------------------
 
+def _bundled_resources_dir() -> Optional[Path]:
+    """Best-effort location of bundled resources in frozen macOS builds."""
+    if getattr(sys, "frozen", False):
+        try:
+            exe = Path(sys.executable).resolve()
+            # macOS app layout: <App>.app/Contents/MacOS/<exe>
+            contents_dir = exe.parents[1]
+            resources_dir = contents_dir / "Resources"
+            if resources_dir.exists():
+                return resources_dir
+        except Exception:
+            pass
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        try:
+            p = Path(meipass)
+            if p.exists():
+                return p
+        except Exception:
+            pass
+
+    return None
+
+
+def _resolve_ffmpeg_exe() -> Optional[Path]:
+    """Return an ffmpeg executable path, if available.
+
+    Order:
+      1) Env override (TUNESYNC_FFMPEG / FFMPEG)
+      2) PATH
+      3) imageio-ffmpeg packaged binary
+      4) Bundled Resources/bin/ffmpeg
+    """
+    env_path = (os.getenv("TUNESYNC_FFMPEG") or os.getenv("FFMPEG") or "").strip()
+    if env_path:
+        p = Path(env_path).expanduser()
+        if p.exists():
+            return p
+
+    which = shutil.which("ffmpeg")
+    if which:
+        return Path(which)
+
+    try:
+        import imageio_ffmpeg  # type: ignore
+
+        p = Path(imageio_ffmpeg.get_ffmpeg_exe())
+        if p.exists():
+            return p
+    except Exception:
+        pass
+
+    resources_dir = _bundled_resources_dir()
+    if resources_dir:
+        p = resources_dir / "bin" / "ffmpeg"
+        if p.exists():
+            return p
+
+    return None
+
+
+def _ffmpeg_location_dir() -> Optional[str]:
+    ffmpeg = _resolve_ffmpeg_exe()
+    return str(ffmpeg.parent) if ffmpeg else None
+
+
 def _have_ffmpeg() -> bool:
-    return shutil.which("ffmpeg") is not None
+    return _resolve_ffmpeg_exe() is not None
 
 def _ffmpeg_transcode_to_m4a(src: Path, dst: Path, aac_kbps: int = 192) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg = _resolve_ffmpeg_exe()
+    if not ffmpeg:
+        raise FileNotFoundError("ffmpeg not found")
     cmd = [
-        "ffmpeg", "-y", "-nostdin",
+        str(ffmpeg), "-y", "-nostdin",
         "-i", str(src),
         "-vn",  # No video
         "-c:a", "aac",  # AAC audio codec
@@ -627,11 +727,13 @@ def download_track(
     if not _have_ffmpeg():
         return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, error="ffmpeg not found on PATH")
 
+    ffmpeg_location = _ffmpeg_location_dir()
+
     label = f"{artist} - {title}"
     try:
         out_root.mkdir(parents=True, exist_ok=True)
         # Always include track_id in filename to guarantee uniqueness
-        base = f"{_sanitize(label)} [{track_id[:8]}]"
+        base = f"{_sanitize(label)} {_track_marker(track_id)}"
         conn = get_conn()
 
         # Short-circuit if a compatible file already exists
@@ -655,7 +757,6 @@ def download_track(
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,
-                "ignoreerrors": True,  # Suppress transient errors during retries
                 "noplaylist": True,
                 "continuedl": True,
                 # Reduce concurrent downloads to avoid m3u8 fragment race conditions
@@ -673,13 +774,20 @@ def download_track(
                 "outtmpl": str(out_root / f"{base}.%(ext)s"),
                 "postprocessors": [],
                 "progress_hooks": hooks,
-                "cookiesfrombrowser": ["chrome"],  # Extract cookies from Chrome for SoundCloud auth
+                # Android VR/Creator clients bypass YouTube PO token and JS challenge requirements
+                # android_vr, android_creator, android_music all return format 140 without cookies
+                "extractor_args": {"youtube": {"player_client": ["android_vr", "android_creator", "android_music"]}},
                 # Sleep between retries to avoid rate limiting
                 "sleep_interval": 1,
                 "max_sleep_interval": 3,
             }
+            if ffmpeg_location:
+                ydl_opts["ffmpeg_location"] = ffmpeg_location
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(u, download=True)
+                if info is None:
+                    return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
+                                          source_url=u, error="Download failed (yt-dlp returned no info)")
                 if info.get("_type") == "playlist" and info.get("entries"):
                     info = info["entries"][0]
 
@@ -691,32 +799,24 @@ def download_track(
                     # Use the file yt-dlp actually created
                     final = Path(actual_filepath)
                 else:
-                    # Fallback: search by track_id only (most reliable)
-                    track_id_short = track_id[:8]
+                    # Fallback: search by literal track marker only (safe under concurrency)
                     final = None
                     
                     # Wait a moment for filesystem to catch up, then search by track_id
                     for retry in range(8):
-                        for audio_ext in ("m4a", "mp3", "opus", "webm", "aac", "mp4", "flac", "wav"):
-                            # Search for ANY file containing our track_id
-                            pattern = f"*[{track_id_short}]*.{audio_ext}"
-                            matches = list(out_root.glob(pattern))
-                            if matches:
-                                # Take the most recently created matching file
-                                found = max(matches, key=lambda p: p.stat().st_mtime)
-                                # Rename to our expected format for consistency
-                                expected_name = f"{base}.{audio_ext}"
-                                expected_path = out_root / expected_name
-                                if found != expected_path:
-                                    try:
-                                        found.rename(expected_path)
-                                        final = expected_path
-                                    except OSError:
-                                        # If rename fails, use what we found
-                                        final = found
-                                else:
+                        found = _find_downloaded_file_by_marker(out_root, track_id=track_id)
+                        if found:
+                            audio_ext = found.suffix.lstrip(".").lower()
+                            expected_name = f"{base}.{audio_ext}"
+                            expected_path = out_root / expected_name
+                            if found != expected_path:
+                                try:
+                                    found.rename(expected_path)
+                                    final = expected_path
+                                except OSError:
                                     final = found
-                                break
+                            else:
+                                final = found
                         
                         if final:
                             break
@@ -959,10 +1059,12 @@ def download_track_from_url(
     if not _have_ffmpeg():
         return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, error="ffmpeg not found on PATH")
 
+    ffmpeg_location = _ffmpeg_location_dir()
+
     label = f"{artist} - {title}"
     try:
         out_root.mkdir(parents=True, exist_ok=True)
-        base = f"{_sanitize(label)} [{track_id[:8]}]"
+        base = f"{_sanitize(label)} {_track_marker(track_id)}"
 
         # Short-circuit if already exists.
         for ext in ("m4a", "mp3", "flac", "wav", "aiff", "alac", "aac", "webm", "opus"):
@@ -989,10 +1091,14 @@ def download_track_from_url(
             "outtmpl": str(out_root / f"{base}.%(ext)s"),
             "postprocessors": [],
             "progress_hooks": hooks,
-            "cookiesfrombrowser": ["chrome"],
+            # Android VR/Creator clients bypass YouTube PO token and JS challenge requirements
+            # android_vr, android_creator, android_music all return format 140 without cookies
+            "extractor_args": {"youtube": {"player_client": ["android_vr", "android_creator", "android_music"]}},
             "sleep_interval": 1,
             "max_sleep_interval": 3,
         }
+        if ffmpeg_location:
+            ydl_opts["ffmpeg_location"] = ffmpeg_location
 
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -1006,25 +1112,21 @@ def download_track_from_url(
             if actual_filepath and Path(actual_filepath).exists():
                 final = Path(actual_filepath)
             else:
-                # Fallback: locate by track id in output folder.
-                track_id_short = track_id[:8]
+                # Fallback: locate by exact marker in output folder.
                 final = None
                 for _retry in range(8):
-                    for audio_ext in ("m4a", "mp3", "opus", "webm", "aac", "mp4", "flac", "wav"):
-                        pattern = f"*[{track_id_short}]*.{audio_ext}"
-                        matches = list(out_root.glob(pattern))
-                        if matches:
-                            found = max(matches, key=lambda p: p.stat().st_mtime)
-                            expected = out_root / f"{base}.{audio_ext}"
-                            if found != expected:
-                                try:
-                                    found.rename(expected)
-                                    final = expected
-                                except OSError:
-                                    final = found
-                            else:
+                    found = _find_downloaded_file_by_marker(out_root, track_id=track_id)
+                    if found:
+                        audio_ext = found.suffix.lstrip(".").lower()
+                        expected = out_root / f"{base}.{audio_ext}"
+                        if found != expected:
+                            try:
+                                found.rename(expected)
+                                final = expected
+                            except OSError:
                                 final = found
-                            break
+                        else:
+                            final = found
                     if final:
                         break
                     time.sleep(0.5)

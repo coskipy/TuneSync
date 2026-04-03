@@ -35,7 +35,7 @@ pip install -r requirements.txt
 3. Fill in:
     - App Name: `TuneSync`
     - App Description: `Personal DJ library sync`
-    - Redirect URI: `http://127.0.0.1:5000/callback` ⚠️ IMPORTANT
+    - Redirect URI: `http://127.0.0.1:8765/callback` ⚠️ IMPORTANT
 4. Save and copy your **Client ID** and **Client Secret**
 
 ## Step 4: Create Configuration
@@ -53,7 +53,7 @@ Fill in:
 ```bash
 SPOTIPY_CLIENT_ID=paste_your_client_id_here
 SPOTIPY_CLIENT_SECRET=paste_your_secret_here
-SPOTIPY_REDIRECT_URI=http://127.0.0.1:5000/callback
+SPOTIPY_REDIRECT_URI=http://127.0.0.1:8765/callback
 
 DOWNLOAD_ROOT=/Users/yourname/Music/DJ
 REKORDBOX_XML_PATH=/Users/yourname/Music/DJ/rekordbox.xml
@@ -98,7 +98,7 @@ which ffmpeg  # Should show a path
 
 **"Redirect URI mismatch"**
 
-- Verify the redirect URI in your Spotify app settings is EXACTLY: `http://127.0.0.1:5000/callback`
+- Verify the redirect URI in your Spotify app settings is EXACTLY: `http://127.0.0.1:8765/callback`
 
 **Python version too old**
 

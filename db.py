@@ -1,5 +1,6 @@
 # db.py
 import os
+import sys
 import sqlite3
 from pathlib import Path
 from contextlib import contextmanager
@@ -9,6 +10,38 @@ import re
 _BASE_DIR = Path(__file__).resolve().parent
 
 
+def _default_app_data_dir() -> Path:
+    # macOS: ~/Library/Application Support/TuneSync
+    try:
+        if sys.platform == "darwin":
+            return (Path.home() / "Library" / "Application Support" / "TuneSync")
+    except Exception:
+        pass
+    # Fallback: a hidden folder in the home directory
+    return Path.home() / ".tunesync"
+
+
+def _default_db_path() -> Path:
+    # Default to a stable, user-writable location (survives app updates).
+    d = _default_app_data_dir()
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return d / "TuneSync.sqlite3"
+
+
+def _default_synced_txt_path() -> Path:
+    if bool(getattr(sys, "frozen", False)):
+        d = _default_app_data_dir()
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return d / "synced.txt"
+    return _BASE_DIR / "synced.txt"
+
+
 def _path_from_env(var: str, default: Path) -> Path:
     v = (os.getenv(var) or "").strip()
     if not v:
@@ -16,14 +49,34 @@ def _path_from_env(var: str, default: Path) -> Path:
     return Path(v).expanduser().resolve()
 
 
-# Default to a stable location (repo root) instead of the current working directory.
-DB_PATH = _path_from_env("TUNESYNC_DB_PATH", _BASE_DIR / "TuneSync.sqlite3")
-LEGACY_SYNCED_TXT_PATH = _path_from_env("TUNESYNC_SYNCED_TXT_PATH", _BASE_DIR / "synced.txt")
+def get_db_path() -> Path:
+    """Return the active DB path, honoring env overrides."""
+    return _path_from_env("TUNESYNC_DB_PATH", _default_db_path())
+
+
+def get_legacy_synced_txt_path() -> Path:
+    """Return the active legacy synced.txt path, honoring env overrides."""
+    return _path_from_env("TUNESYNC_SYNCED_TXT_PATH", _default_synced_txt_path())
+
+
+# Default to a stable location.
+# - Dev: repo root
+# - Packaged app: Application Support
+# NOTE: These globals are updated at runtime by get_conn() so changing env vars
+# (e.g. from the GUI Settings) takes effect without an app restart.
+DB_PATH = get_db_path()
+LEGACY_SYNCED_TXT_PATH = get_legacy_synced_txt_path()
 
 
 def get_conn():
     """Return a SQLite connection with foreign keys enabled."""
-    conn = sqlite3.connect(DB_PATH)
+    global DB_PATH, LEGACY_SYNCED_TXT_PATH
+    try:
+        DB_PATH = get_db_path()
+        LEGACY_SYNCED_TXT_PATH = get_legacy_synced_txt_path()
+    except Exception:
+        pass
+    conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA journal_mode=WAL")

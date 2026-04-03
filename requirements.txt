@@ -5,3 +5,4 @@ git+https://github.com/yt-dlp/yt-dlp.git
 mutagen>=1.47.0
 requests>=2.31.0
 PySide6
+imageio-ffmpeg>=0.5.1
