@@ -652,6 +652,50 @@ def _ffmpeg_location_dir() -> Optional[str]:
     return str(ffmpeg.parent) if ffmpeg else None
 
 
+def _resolve_ffprobe_exe() -> Optional[Path]:
+    ffmpeg = _resolve_ffmpeg_exe()
+    if ffmpeg:
+        candidate = ffmpeg.with_name("ffprobe")
+        if candidate.exists():
+            return candidate
+    which = shutil.which("ffprobe")
+    return Path(which) if which else None
+
+
+def _m4a_major_brand(path: Path) -> Optional[str]:
+    ffprobe = _resolve_ffprobe_exe()
+    if not ffprobe:
+        return None
+    try:
+        cmd = [
+            str(ffprobe),
+            "-v",
+            "error",
+            "-show_entries",
+            "format_tags=major_brand",
+            "-of",
+            "default=nw=1:nk=1",
+            str(path),
+        ]
+        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode("utf-8", "ignore").strip()
+        return out or None
+    except Exception:
+        return None
+
+
+def _needs_cdj_m4a_normalization(path: Path) -> bool:
+    """Return True for m4a files that should be normalized for CDJ playback.
+
+    Pioneer CDJs can reject some DASH/fMP4-flavored M4A files (major_brand=dash)
+    even when the codec is AAC-LC. Rewriting through ffmpeg yields a standard M4A
+    container that is broadly compatible.
+    """
+    if path.suffix.lower() != ".m4a":
+        return False
+    brand = (_m4a_major_brand(path) or "").strip().lower()
+    return brand == "dash"
+
+
 def _have_ffmpeg() -> bool:
     return _resolve_ffmpeg_exe() is not None
 
@@ -844,26 +888,32 @@ def download_track(
                 ext = final.suffix.lstrip(".").lower()
                 if ext in REKORDBOX_AUDIO_EXTS:
                     abr = int(info["abr"]) if isinstance(info.get("abr"), (int, float)) else None
+                    needs_cdj_fix = _needs_cdj_m4a_normalization(final)
                     
                     # If configured to always transcode, check if we need to
                     # Skip transcoding if already in a good format (m4a or mp3)
-                    if ALWAYS_TRANSCODE_TO and ext not in (ALWAYS_TRANSCODE_TO, "mp3"):
+                    if (ALWAYS_TRANSCODE_TO and ext not in (ALWAYS_TRANSCODE_TO, "mp3")) or needs_cdj_fix:
                         if progress:
                             print(f"\r  ", end="", flush=True)  # Clear search status
-                        m4a_path = out_root / f"{base}.{ALWAYS_TRANSCODE_TO}"
+                        target_ext = ALWAYS_TRANSCODE_TO or "m4a"
+                        m4a_path = out_root / f"{base}.{target_ext}"
                         _ffmpeg_transcode_to_m4a(final, m4a_path, aac_kbps=aac_kbps)
                         
                         # Delete the original file after successful transcode
-                        try:
-                            final.unlink()
-                        except OSError:
-                            pass  # Ignore deletion errors
+                        if final != m4a_path:
+                            try:
+                                final.unlink()
+                            except OSError:
+                                pass  # Ignore deletion errors
                         
                         if progress:
-                            print(f"\r  {label}: Complete ✓ (transcoded)                    ")
+                            if needs_cdj_fix:
+                                print(f"\r  {label}: Complete ✓ (CDJ normalized)                    ")
+                            else:
+                                print(f"\r  {label}: Complete ✓ (transcoded)                    ")
                         return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title,
                                               final_path=m4a_path,
-                                              source_url=u, ext=ALWAYS_TRANSCODE_TO, abr_kbps=aac_kbps, transcoded=True)
+                                              source_url=u, ext=target_ext, abr_kbps=aac_kbps, transcoded=True)
                     else:
                         # Keep as-is (already m4a or mp3)
                         if progress:
@@ -1146,14 +1196,17 @@ def download_track_from_url(
             ext = final.suffix.lstrip(".").lower()
             if ext in REKORDBOX_AUDIO_EXTS:
                 abr = int(info["abr"]) if isinstance(info.get("abr"), (int, float)) else None
-                if ALWAYS_TRANSCODE_TO and ext not in (ALWAYS_TRANSCODE_TO, "mp3"):
-                    m4a_path = out_root / f"{base}.{ALWAYS_TRANSCODE_TO}"
+                needs_cdj_fix = _needs_cdj_m4a_normalization(final)
+                if (ALWAYS_TRANSCODE_TO and ext not in (ALWAYS_TRANSCODE_TO, "mp3")) or needs_cdj_fix:
+                    target_ext = ALWAYS_TRANSCODE_TO or "m4a"
+                    m4a_path = out_root / f"{base}.{target_ext}"
                     _ffmpeg_transcode_to_m4a(final, m4a_path, aac_kbps=aac_kbps)
-                    try:
-                        final.unlink()
-                    except OSError:
-                        pass
-                    return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title, final_path=m4a_path, source_url=url, ext=ALWAYS_TRANSCODE_TO, abr_kbps=aac_kbps, transcoded=True)
+                    if final != m4a_path:
+                        try:
+                            final.unlink()
+                        except OSError:
+                            pass
+                    return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title, final_path=m4a_path, source_url=url, ext=target_ext, abr_kbps=aac_kbps, transcoded=True)
 
                 return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title, final_path=final, source_url=url, ext=ext, abr_kbps=abr, transcoded=False)
 
