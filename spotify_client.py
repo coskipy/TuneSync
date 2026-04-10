@@ -164,7 +164,11 @@ class SpotifyClient:
             pass
 
     @classmethod
-    def login(cls, scope: str = "playlist-read-private", silent: bool = False) -> spotipy.Spotify:
+    def login(
+        cls,
+        scope: str = "playlist-read-private playlist-read-collaborative",
+        silent: bool = False,
+    ) -> spotipy.Spotify:
         cls._load_env()
         client_id = (os.getenv("SPOTIPY_CLIENT_ID") or "").strip() or None
         redirect_uri = cls._normalize_redirect_uri(os.getenv("SPOTIPY_REDIRECT_URI"))
@@ -257,13 +261,55 @@ class SpotifyClient:
             return False
 
     @classmethod
+    def is_authenticated(cls) -> bool:
+        """Check if we have a valid token by calling a playlist-scoped endpoint."""
+        try:
+            sp = cls.login(silent=True)
+            # Validate auth using playlist scope (always requested by TuneSync).
+            sp.current_user_playlists(limit=1)
+            return True
+        except Exception:
+            # Token is invalid, expired, or revoked - clear it
+            try:
+                cls.logout()
+            except Exception:
+                pass
+            return False
+
+    @classmethod
     def logout(cls) -> None:
+        cls._load_env()
         try:
             handler = _make_cache_handler()
             if hasattr(handler, "delete"):
                 handler.delete()  # type: ignore[attr-defined]
         except Exception:
             pass
+
+        # Best-effort hard clear: some cache handlers may not expose delete reliably.
+        try:
+            handler = _make_cache_handler()
+            if hasattr(handler, "save_token_to_cache"):
+                handler.save_token_to_cache({})  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+        try:
+            from pathlib import Path
+
+            cache_dir = cls._default_app_data_dir()
+            for p in (
+                cache_dir / "spotify_token.json",
+                Path(".spotify_token.json"),
+            ):
+                try:
+                    if p.exists():
+                        p.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         cls.sp = None
         cls._auth_open_browser = None
         cls._auth_scope = None

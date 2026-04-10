@@ -1335,8 +1335,15 @@ class _SpotifyAuthWorker(QObject):
 
             import spotipy
             sp = spotipy.Spotify(auth_manager=auth, requests_timeout=10)
-            me = sp.current_user() or {}
-            who = (me.get("display_name") or me.get("id") or "Spotify")
+            # Validate the token with a playlist-scoped endpoint.
+            sp.current_user_playlists(limit=1)
+            who = "Spotify"
+            try:
+                me = sp.current_user() or {}
+                who = (me.get("display_name") or me.get("id") or "Spotify")
+            except Exception:
+                # Some tokens may omit profile scopes; sign-in is still valid for playlist sync.
+                pass
             self.done.emit(str(who))
         except Exception as e:
             self.failed.emit(str(e))
@@ -3978,14 +3985,17 @@ class HomeWindow(QMainWindow):
         except Exception:
             self.spotify_counts.setText("—")
 
-    def _update_spotify_auth_ui(self) -> None:
+    def _update_spotify_auth_ui(self, *, force_authed: bool | None = None) -> None:
         authed = False
-        try:
-            from spotify_client import SpotifyClient
+        if force_authed is None:
+            try:
+                from spotify_client import SpotifyClient
 
-            authed = SpotifyClient.has_cached_token()
-        except Exception:
-            authed = False
+                authed = SpotifyClient.is_authenticated()
+            except Exception:
+                authed = False
+        else:
+            authed = bool(force_authed)
 
         try:
             self.spotify_login.setEnabled(not authed)
@@ -4021,8 +4031,8 @@ class HomeWindow(QMainWindow):
             pass
 
     def _spotify_sign_in(self) -> None:
-        # Request only what we need for the app.
-        scope = "playlist-read-private playlist-read-collaborative"
+        # Request playlist scopes plus profile-read so we can show account identity.
+        scope = "playlist-read-private playlist-read-collaborative user-read-private"
 
         try:
             self.spotify_login.setEnabled(False)
@@ -4132,7 +4142,7 @@ class HomeWindow(QMainWindow):
             self._push_notification("Spotify logged out", kind="info")
         except Exception:
             pass
-        self._update_spotify_auth_ui()
+        self._update_spotify_auth_ui(force_authed=False)
         self._load_cards_from_db()
 
     def _show_rekordbox_guide(self) -> None:
@@ -4535,7 +4545,7 @@ class HomeWindow(QMainWindow):
             try:
                 from spotify_client import SpotifyClient
 
-                if not SpotifyClient.has_cached_token():
+                if not SpotifyClient.is_authenticated():
                     from db import get_conn
 
                     conn = get_conn()
