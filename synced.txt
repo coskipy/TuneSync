@@ -30,3 +30,47 @@ RNB = https://open.spotify.com/playlist/2EOKOuDd5Yiwq4u2AD3weL?si=775d877c02be47
 TRANCE = https://open.spotify.com/playlist/1iXoRdVU33nShkesFAGCK2?si=86d6c0e4c73a4adb
 PSYPROG = https://open.spotify.com/playlist/4sJ048ACa82Mw8JYwIf1CY?si=ff551fe448984ef0
 HYPERBITCH = https://open.spotify.com/playlist/12JEufd4QMoRnppXTKXMLt?si=388f8b2715604fac
+CHILL GARAGE = https://open.spotify.com/playlist/4AKX2EoDDth1fCQ0w8Y9WH?si=039e0efe374b42bd
+CHILL PROG = https://open.spotify.com/playlist/6qGJKkgdNo3FlgYMHrsaKl?si=653f3070716847fc
+OPEN CLOSE = https://open.spotify.com/playlist/5TzUKI0Be4OmQWLFgUJ9mw?si=4ecd793e73ae4657
+BIGROOM = https://open.spotify.com/playlist/7wle3ChEyJrAwyE89BzDuk?si=9a82e768b2fd4a3b
+TULUM TUNES = https://open.spotify.com/playlist/31hzjpPr4dHExkcvqmYlPK?si=893264b945af4031
+DRUMSTICK = https://open.spotify.com/playlist/5ZlwB9PaXHllV80NN60FvB?si=68577c2e84534f2b
+MOLASSES = https://open.spotify.com/playlist/6jbq6FgPHm9g1vJNWGXJwt?si=04042b971d1c46bb
+stank (Ethan) = https://open.spotify.com/playlist/2IA3AvVJ0U5WmZdHWM4LBY?si=94a54148b3294f63
+GROOVE = https://open.spotify.com/playlist/7sgdfysixFWcdZOBNRrFDD
+DUSK = https://open.spotify.com/playlist/6VDBZQqLOgRrg91F2wqGt9
+Bounce (Ethan) = https://open.spotify.com/playlist/1WopA95e1o52hBekwLbAq5?si=3d1ce4500c4343c8
+INDIANA TONES = https://open.spotify.com/playlist/31EiPR08ruFjAS6eyNnBIK?si=c74c840e0c1e44d1
+ORCHOUSE = https://open.spotify.com/playlist/19DqnPf0SpnaLdEr1LWOdv?si=58b19e6fec3042f4
+BREAKBEAT = https://open.spotify.com/playlist/6ATiEDe122lT2lSNaha00e?si=f6633bdf5a8f4bec
+COLLABORAVE = https://open.spotify.com/playlist/76zxYFDHkcEmx15rrAJAMS?si=ad5e6ff7a52a44bd
+DISCORE = https://open.spotify.com/playlist/3ituinQOcVyaBzx7v3oiTM?si=341e1c90e6544dcd
+REQ = https://open.spotify.com/playlist/1w6HEvQjRc2b6TolUU3LsQ?si=23cb0f0bd3c74f2a
+deep into the night (Miles) = https://open.spotify.com/playlist/5hMFhlylwvTnUIuZmekDzY?si=68d3bc508c854d8f
+tech house (Miles) = https://open.spotify.com/playlist/46Q6W1j0Pj1Yu5cmTsWupB?si=3b1a0e53e4e442a8
+dark prog (Miles) = https://open.spotify.com/playlist/2QgXqwqgmy9RYYRi4qDk2r?si=7cdbb467205e4d69
+dark minimal tech (Miles) = https://open.spotify.com/playlist/2ItgTGlVkJSpsBfpVnhRvD?si=31fb4c3fd21c462c
+MICHELIN STAR = https://open.spotify.com/playlist/4gEzWxEIX1qXQxeiWZ2yEY?si=c3fd95ebaa444e38
+prog house (Miles) = https://open.spotify.com/playlist/5Gc3QEQt20WTdlVc8Iqi6P?si=86f2ac3a3a7a42eb
+groovy techno (Miles) = https://open.spotify.com/playlist/33lliMxcTM3mJDCLgKnk97?si=2223df76c5fb4e9c
+dark n groovy (Miles) = https://open.spotify.com/playlist/0XbpcvTLJVUUOhVZIMEgtT?si=4d81b3804e7e40da
+berlin (Miles) = https://open.spotify.com/playlist/2pJyfdSFvCv2lMyfXpf5rX?si=d811e71015aa4c94
+wobbly wobs (Miles) = https://open.spotify.com/playlist/7EanomkRraSM9ufjrfi7J0?si=812894dfa4c94cfa
+bradley sweirs house (Orlando) = https://open.spotify.com/playlist/7ivU5hbaLnuIoqrW4P4Mg7?si=4dbc3d43012f4382
+i dont even go to sleep anymore (Orlando) = https://open.spotify.com/playlist/3BtOMsQNNCUpQfesLLLpFA?si=61397321325049a7
+drum and babe (Orlando) = https://open.spotify.com/playlist/3cQLH6ELRJXraPdpeGDXQt?si=d02d404e0a87410e
+bang bang (Orlando) = https://open.spotify.com/playlist/7eOUD6UosWY1IIRVvudm44?si=399ffcd31a8e4a1f
+songs i could potentially chill to (Orlando) = https://open.spotify.com/playlist/4QcprN1ZoNR01NXS96nqbf?si=3b14d73a77754cac
+spiritual but not religious (Orlando) = https://open.spotify.com/playlist/4YROeOQzk9cTQr1jxmuCK7?si=5707b7a1941546ca
+im not anticyclone (Orlando) = https://open.spotify.com/playlist/4JLjv8plaotaRx8S3NI1Qa?si=60f6c0234696406d
+nye refresh (Orlando) = https://open.spotify.com/playlist/4JLjv8plaotaRx8S3NI1Qa?si=60f6c0234696406d
+project groove (Miles) = https://open.spotify.com/playlist/32sxFYSJE0NiuS83RLJyET?si=W1ZlrRZ2TKKg5uqJcpdhQA
+DOCTOR DARK = https://open.spotify.com/playlist/3P5ttpL2rLIXEHdsF8nV0e?si=2213a487ab5e48c6
+ecstatic dance (Vicky) = https://open.spotify.com/playlist/3Ch4u5a1kG1h0Mw9Tq2eha?si=qht5ry8URDaRBKli0EiEVw
+morning bliss (Miles) = https://open.spotify.com/playlist/00OcGNZYxwO7jTtDrDOI2n?si=473e6ed8fee54c9f
+DOWNTEMPO = https://open.spotify.com/playlist/2VQIqPOJ0MFIP2FWWt6fcK?si=494a5ea285fd425c
+CHILLANCE = https://open.spotify.com/playlist/76ifA8nkzONN9dFZHFX1ob?si=5418a35eba1c4f1f
+VIBARS = https://open.spotify.com/playlist/58nJNNYS3mitE3XbCa6q5w?si=a83a6534caa346f4
+GRIME = https://open.spotify.com/playlist/6Z7LGBsykWsQ9c92CfOzln
+lounging around = https://open.spotify.com/playlist/1ThhQdB9g2ZChaln3Wezl2

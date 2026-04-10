@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Iterable, Set
 import re
 import unicodedata
 
-from db import get_conn, attach_file, resolve_path, delete_source_cache
+from db import get_conn, attach_file, resolve_path
 
 # Files Rekordbox handles (plus a couple we may transcode from)
 AUDIO_EXTS = {"m4a", "mp3", "aac", "wav", "aiff", "flac", "alac", "opus", "webm"}
@@ -87,6 +87,53 @@ def _is_ignored(rel_path: Path, ignore_dirs: Set[str]) -> bool:
     return any(part.lower() in ignore_lower for part in rel_path.parts)
 
 
+def _cleanup_missing_files(conn, download_root: Path) -> int:
+    """
+    Remove database entries for files that no longer exist on disk.
+    Returns number of entries removed.
+    """
+    rows = conn.execute("SELECT track_id, file_path FROM files").fetchall()
+    removed = 0
+    
+    for r in rows:
+        file_path = resolve_path(download_root, r["file_path"])
+        if not file_path.exists():
+            conn.execute("DELETE FROM files WHERE track_id = ?", (r["track_id"],))
+            removed += 1
+    
+    if removed > 0:
+        conn.commit()
+    
+    return removed
+
+
+def _cleanup_fragment_files(download_root: Path) -> int:
+    """
+    Remove leftover fragment files from incomplete/failed yt-dlp downloads.
+    These are files matching patterns:
+    - *.part-Frag*
+    - *.part (without extension)
+    - *.ytdl
+    
+    Returns number of files deleted.
+    """
+    deleted = 0
+    
+    # Find all fragment files
+    for pattern in ["*.part-Frag*", "*.part", "*.ytdl"]:
+        for p in download_root.rglob(pattern):
+            if p.is_file():
+                try:
+                    # Extra safety: only delete if it looks like a fragment
+                    if "-Frag" in p.name or p.suffix == ".part" or p.suffix == ".ytdl":
+                        p.unlink()
+                        deleted += 1
+                except OSError:
+                    pass
+    
+    return deleted
+
+
 # ---------------------------
 # Public API
 # ---------------------------
@@ -95,6 +142,9 @@ def rescan_existing_files(download_root: Path, ignore_dirs: Iterable[str] | None
     """
     Walk download_root, try to attach files that already exist on disk
     to tracks in the DB, using filename matching and duration as tiebreaker.
+    
+    Also removes database entries for files that no longer exist on disk.
+    Also cleans up leftover fragment files from incomplete downloads.
 
     ignore_dirs: names of directories to skip anywhere under download_root (case-insensitive),
                  e.g. {"old", ".trash"}.
@@ -103,6 +153,13 @@ def rescan_existing_files(download_root: Path, ignore_dirs: Iterable[str] | None
     """
     ignore_dirs = set(ignore_dirs or [])
     conn = get_conn()
+    
+    # First, clean up missing files from the database
+    removed = _cleanup_missing_files(conn, download_root)
+    
+    # Clean up fragment files
+    fragments_deleted = _cleanup_fragment_files(download_root)
+    
     expected = _build_expected_map(conn)
 
     scanned = 0
@@ -169,6 +226,8 @@ def rescan_existing_files(download_root: Path, ignore_dirs: Iterable[str] | None
         "ambiguous": ambiguous,
         "unmatched": unmatched,
         "skipped": skipped,
+        "removed": removed,
+        "fragments_deleted": fragments_deleted,
     }
 
 
@@ -206,7 +265,6 @@ def purge_bad_duration_files(download_root: Path, *, max_ratio: float = 0.2, min
             except OSError:
                 pass
             conn.execute("DELETE FROM files WHERE track_id = ?", (r["track_id"],))
-            delete_source_cache(conn, r["track_id"])
             purged += 1
     conn.commit()
     return {"checked": checked, "purged": purged}

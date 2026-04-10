@@ -1,4 +1,49 @@
+# Environment and secrets
 .env
-synced.txt
-capsize.sqlite3
+
+# Database
+TuneSync.sqlite3
+TuneSync.sqlite3-shm
+TuneSync.sqlite3-wal
+TuneSync.sqlite3.backup.*
+TuneSync.sqlite3.bad.*
+TuneSync.sqlite3.corrupt.*
+TuneSync.sqlite3.recovered*
+
+# Cache and sync files
+.cache/
 synced_backup.txt
+cdj_fix_batch.log
+cdj_unsupported_candidates.txt
+cdj_unsupported_song_names.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+TuneSync.app/
+
+# Backups
+*.backup
+*.bak

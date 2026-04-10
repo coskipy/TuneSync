@@ -127,7 +127,7 @@ def _tag_flac(path: Path, meta: dict, cover_bytes: Optional[bytes], mime: Option
     audio.save()
 
 
-def tag_tracks_in_db(download_root: Path, track_ids: Optional[Iterable[str]] = None) -> dict:
+def tag_tracks_in_db(download_root: Path, track_ids: Optional[Iterable[str]] = None, progress: bool = True) -> dict:
     """
     Tag files referenced in DB with Spotify metadata & cover art.
     If track_ids is None, tag everything that has a file.
@@ -156,6 +156,9 @@ def tag_tracks_in_db(download_root: Path, track_ids: Optional[Iterable[str]] = N
             continue
         path_map[tid] = abs_path
 
+    total = len(path_map)
+    current = 0
+
     if path_map:
         try:
             metas = SpotifyClient.get_tracks_details(list(path_map.keys()))
@@ -170,6 +173,10 @@ def tag_tracks_in_db(download_root: Path, track_ids: Optional[Iterable[str]] = N
             if not abs_path:
                 continue
             remaining.discard(tid)
+            current += 1
+
+            if progress:
+                print(f"\r  Tagging: {current}/{total}  ({full['artist']} - {full['title'][:30]}...)", end="", flush=True)
 
             try:
                 cover_bytes, mime = _fetch_cover(full.get("cover_url"))
@@ -195,7 +202,6 @@ def tag_tracks_in_db(download_root: Path, track_ids: Optional[Iterable[str]] = N
                     # leave WAV/AIFF/etc untagged
                     skipped += 1
                     continue
-
                 done += 1
             except MutagenError:
                 errors += 1
@@ -204,5 +210,8 @@ def tag_tracks_in_db(download_root: Path, track_ids: Optional[Iterable[str]] = N
                 errors += 1
 
         errors += len(remaining)
+        
+        if progress and total > 0:
+            print(f"\r  Tagging: {total}/{total} Complete!{' '*50}")
 
     return {"tagged": done, "skipped": skipped, "errors": errors}

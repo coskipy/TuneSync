@@ -1,0 +1,13 @@
+# TuneSync Playlist Configuration
+# Format: PLAYLIST_NAME = spotify_playlist_url
+#
+# To get playlist URLs:
+# 1. Open Spotify
+# 2. Right-click a playlist → Share → Copy link to playlist
+# 3. Paste below with a custom name
+#
+# Example:
+
+My House Mix = https://open.spotify.com/playlist/37i9dQZF1DX4dyzvuaRJ0n
+Techno Essentials = https://open.spotify.com/playlist/37i9dQZF1DX6J5NfMJS675
+Deep Cuts = https://open.spotify.com/playlist/37i9dQZF1DXa8NOEUWPn9W
