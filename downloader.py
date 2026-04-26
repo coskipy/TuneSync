@@ -686,14 +686,63 @@ def _m4a_major_brand(path: Path) -> Optional[str]:
 def _needs_cdj_m4a_normalization(path: Path) -> bool:
     """Return True for m4a files that should be normalized for CDJ playback.
 
-    Pioneer CDJs can reject some DASH/fMP4-flavored M4A files (major_brand=dash)
-    even when the codec is AAC-LC. Rewriting through ffmpeg yields a standard M4A
-    container that is broadly compatible.
+    Pioneer CDJs can reject some M4A variants even if they look valid in desktop
+    players. In practice we normalize when:
+      - container brand is DASH/fMP4, or
+      - audio codec is not AAC-LC, or
+      - channel layout is multichannel (>2), or
+      - sample rate is outside common CDJ-safe AAC rates.
+
+    Rewriting through ffmpeg yields a standard AAC-LC stereo M4A container that is
+    broadly compatible.
     """
     if path.suffix.lower() != ".m4a":
         return False
+
+    # Fast path for known incompatible container flavor.
     brand = (_m4a_major_brand(path) or "").strip().lower()
-    return brand == "dash"
+    if brand == "dash":
+        return True
+
+    ffprobe = _resolve_ffprobe_exe()
+    if not ffprobe:
+        return False
+
+    try:
+        cmd = [
+            str(ffprobe),
+            "-v",
+            "error",
+            "-show_streams",
+            "-of",
+            "json",
+            str(path),
+        ]
+        probe = json.loads(subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode("utf-8", "ignore"))
+    except Exception:
+        return False
+
+    streams = probe.get("streams") or []
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    if not audio:
+        return True
+
+    codec_name = (audio.get("codec_name") or "").lower()
+    profile = (audio.get("profile") or "").upper()
+    channels = int(audio.get("channels") or 0)
+    sample_rate = int(audio.get("sample_rate") or 0)
+
+    # Strict compatibility profile for CDJ-safe M4A.
+    if codec_name != "aac":
+        return True
+    if profile and profile != "LC":
+        return True
+    if channels > 2:
+        return True
+    if sample_rate not in (44100, 48000):
+        return True
+
+    return False
 
 
 def _have_ffmpeg() -> bool:
@@ -704,20 +753,53 @@ def _ffmpeg_transcode_to_m4a(src: Path, dst: Path, aac_kbps: int = 192) -> None:
     ffmpeg = _resolve_ffmpeg_exe()
     if not ffmpeg:
         raise FileNotFoundError("ffmpeg not found")
+
+    # Preserve embedded artwork when present so output shape matches working files.
+    has_attached_pic = False
+    ffprobe = _resolve_ffprobe_exe()
+    if ffprobe:
+        try:
+            probe_cmd = [
+                str(ffprobe),
+                "-v",
+                "error",
+                "-show_streams",
+                "-of",
+                "json",
+                str(src),
+            ]
+            probe = json.loads(subprocess.check_output(probe_cmd, stderr=subprocess.DEVNULL).decode("utf-8", "ignore"))
+            for stream in (probe.get("streams") or []):
+                if stream.get("codec_type") != "video":
+                    continue
+                disp = stream.get("disposition") or {}
+                if int(disp.get("attached_pic") or 0) == 1:
+                    has_attached_pic = True
+                    break
+        except Exception:
+            has_attached_pic = False
+
     cmd = [
         str(ffmpeg), "-y", "-nostdin",
         "-i", str(src),
-        "-vn",  # No video
+        "-map", "0:a:0",
         "-c:a", "aac",  # AAC audio codec
         "-b:a", f"{aac_kbps}k",  # Bitrate
         "-ar", "44100",  # Sample rate (standard for music)
+        "-ac", "2",  # Stereo for CDJ compatibility
         "-af", "aresample=resampler=soxr",  # High-quality resampling
         "-avoid_negative_ts", "make_zero",  # Fix timestamp issues at start
         "-fflags", "+bitexact+genpts",  # Consistent output + regenerate timestamps
         "-movflags", "+faststart",  # Optimize for streaming
+        "-brand", "isom",  # Avoid DASH-style branding that some CDJs reject
+        "-map_metadata", "0",  # Keep core tags from source file
         "-write_xing", "0",  # Don't write Xing header (can cause start issues)
-        str(dst),
     ]
+
+    if has_attached_pic:
+        cmd += ["-map", "0:v:0", "-c:v", "copy", "-disposition:v", "attached_pic"]
+
+    cmd.append(str(dst))
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def _make_progress_hook(label: str):
