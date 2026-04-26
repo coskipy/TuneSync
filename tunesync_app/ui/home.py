@@ -46,6 +46,8 @@ _DEBUG_IMAGES = os.getenv("TUNESYNC_DEBUG_IMAGES", "").strip() in {"1", "true", 
 class DownloadRow(QFrame):
     def __init__(self, *, title: str, subtitle: str, image_url: str | None, net: QNetworkAccessManager):
         super().__init__()
+        self._net = net
+        self._image_url: str | None = None
         self.setStyleSheet(
             "QFrame {"
             "background: #0f1216;"
@@ -77,34 +79,48 @@ class DownloadRow(QFrame):
         text.addWidget(self.s)
         lay.addLayout(text, 1)
 
-        if image_url:
-            req = QNetworkRequest(QUrl(image_url))
-            req.setRawHeader(b"User-Agent", b"TuneSync")
-            req.setRawHeader(b"Accept", b"image/*")
-            try:
-                req.setAttribute(QNetworkRequest.RedirectPolicyAttribute, QNetworkRequest.NoLessSafeRedirectPolicy)
-            except Exception:
-                pass
-            rep = net.get(req)
+        self.set_content(title=title, subtitle=subtitle, image_url=image_url)
 
-            def finished():
-                rep.deleteLater()
-                status = rep.attribute(QNetworkRequest.HttpStatusCodeAttribute)
-                if rep.error() != QNetworkReply.NoError:
-                    if _DEBUG_IMAGES:
-                        print(f"[img] FAIL row status={status} err={rep.error()} url={image_url} msg={rep.errorString()}")
-                    return
-                pm = QPixmap()
-                data = bytes(rep.readAll())
-                if not pm.loadFromData(data):
-                    if _DEBUG_IMAGES:
-                        ct = bytes(rep.rawHeader(b"Content-Type")).decode("utf-8", errors="ignore") if rep.hasRawHeader(b"Content-Type") else ""
-                        print(f"[img] DECODE_FAIL row status={status} ct={ct} bytes={len(data)} url={image_url}")
-                    return
-                scaled = pm.scaled(self.img.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-                self.img.setPixmap(scaled)
+    def set_content(self, *, title: str, subtitle: str, image_url: str | None) -> None:
+        self.t.setText(title)
+        self.s.setText(subtitle)
 
-            rep.finished.connect(finished)
+        if image_url == self._image_url:
+            return
+
+        self._image_url = image_url
+        self.img.clear()
+
+        if not image_url:
+            return
+
+        req = QNetworkRequest(QUrl(image_url))
+        req.setRawHeader(b"User-Agent", b"TuneSync")
+        req.setRawHeader(b"Accept", b"image/*")
+        try:
+            req.setAttribute(QNetworkRequest.RedirectPolicyAttribute, QNetworkRequest.NoLessSafeRedirectPolicy)
+        except Exception:
+            pass
+        rep = self._net.get(req)
+
+        def finished():
+            rep.deleteLater()
+            status = rep.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+            if rep.error() != QNetworkReply.NoError:
+                if _DEBUG_IMAGES:
+                    print(f"[img] FAIL row status={status} err={rep.error()} url={image_url} msg={rep.errorString()}")
+                return
+            pm = QPixmap()
+            data = bytes(rep.readAll())
+            if not pm.loadFromData(data):
+                if _DEBUG_IMAGES:
+                    ct = bytes(rep.rawHeader(b"Content-Type")).decode("utf-8", errors="ignore") if rep.hasRawHeader(b"Content-Type") else ""
+                    print(f"[img] DECODE_FAIL row status={status} ct={ct} bytes={len(data)} url={image_url}")
+                return
+            scaled = pm.scaled(self.img.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            self.img.setPixmap(scaled)
+
+        rep.finished.connect(finished)
 
 
 # -----------------
@@ -2947,6 +2963,12 @@ class HomeWindow(QMainWindow):
         self._reflow_timer.setInterval(90)
         self._reflow_timer.timeout.connect(self._reflow_library_grid_now)
 
+        # Throttle expensive Details pane rebuilds during large sync runs.
+        self._details_refresh_timer = QTimer(self)
+        self._details_refresh_timer.setSingleShot(True)
+        self._details_refresh_timer.setInterval(250)
+        self._details_refresh_timer.timeout.connect(self._maybe_refresh_downloads)
+
         self._downloads_timer = QTimer(self)
         self._downloads_timer.setInterval(1000)
         self._downloads_timer.timeout.connect(self._maybe_refresh_downloads)
@@ -2969,6 +2991,9 @@ class HomeWindow(QMainWindow):
         self._sync_items_order: list[str] = []
         self._sync_attempt: int | None = None
         self._sync_attempt_max: int | None = None
+        self._details_mode: str = ""
+        self._details_render_sig: tuple | None = None
+        self._detail_rows_by_key: dict[str, DownloadRow] = {}
         self._notifications: list[dict] = []
         self._notifications_unread: int = 0
         self._notif_seq: int = 0
@@ -5335,8 +5360,88 @@ class HomeWindow(QMainWindow):
             if w is not None:
                 w.deleteLater()
 
-    def _load_downloaded_details(self) -> None:
+    def _reset_details_state(self) -> None:
+        self._details_render_sig = None
         self._clear_downloads()
+        for w in self._detail_rows_by_key.values():
+            try:
+                w.deleteLater()
+            except Exception:
+                pass
+        self._detail_rows_by_key.clear()
+
+    def _render_details_rows(
+        self,
+        *,
+        mode: str,
+        title: str,
+        rows: list[dict],
+        empty_text: str,
+        tail_note: str | None = None,
+    ) -> None:
+        if mode != self._details_mode:
+            self._details_mode = mode
+            self._reset_details_state()
+
+        sig_rows = tuple((str(r.get("key") or ""), str(r.get("subtitle") or "")) for r in rows)
+        sig = (mode, title, sig_rows, str(tail_note or ""))
+        if self._details_render_sig == sig:
+            return
+        self._details_render_sig = sig
+
+        want_keys = {str(r.get("key") or "") for r in rows}
+        for k in list(self._detail_rows_by_key.keys()):
+            if k not in want_keys:
+                try:
+                    self._detail_rows_by_key[k].deleteLater()
+                except Exception:
+                    pass
+                self._detail_rows_by_key.pop(k, None)
+
+        while self.downloads_lay.count():
+            item = self.downloads_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                try:
+                    w.setParent(None)
+                except Exception:
+                    pass
+
+        self.details_title.setText(title)
+        if not rows:
+            empty = QLabel(empty_text)
+            empty.setStyleSheet("color: #a9b0bb;")
+            self.downloads_lay.addWidget(empty)
+            return
+
+        for r in rows:
+            key = str(r.get("key") or "")
+            row = self._detail_rows_by_key.get(key)
+            if row is None:
+                row = DownloadRow(
+                    title=str(r.get("title") or ""),
+                    subtitle=str(r.get("subtitle") or ""),
+                    image_url=(r.get("image_url") if r.get("image_url") else None),
+                    net=self._net,
+                )
+                self._detail_rows_by_key[key] = row
+            else:
+                row.set_content(
+                    title=str(r.get("title") or ""),
+                    subtitle=str(r.get("subtitle") or ""),
+                    image_url=(r.get("image_url") if r.get("image_url") else None),
+                )
+            self.downloads_lay.addWidget(row)
+
+        if tail_note:
+            more = QLabel(tail_note)
+            more.setStyleSheet("color: #a9b0bb;")
+            self.downloads_lay.addWidget(more)
+
+        self.downloads_lay.addStretch(1)
+
+    def _load_downloaded_details(self) -> None:
+        conn = None
 
         try:
             from db import get_conn
@@ -5347,11 +5452,18 @@ class HomeWindow(QMainWindow):
             else:
                 rows = conn.execute(
                     """
-                    SELECT f.track_id, f.file_path, f.downloaded_at,
-                           t.name AS track_name, t.artist AS track_artist, t.cover_url AS cover_url
+                    SELECT
+                        f.track_id,
+                        t.name AS track_name,
+                        t.artist AS track_artist,
+                        t.cover_url AS cover_url,
+                        COALESCE(GROUP_CONCAT(DISTINCT p.name), '') AS playlist_names
                     FROM files f
                     JOIN tracks t ON t.id = f.track_id
+                    LEFT JOIN playlist_tracks pt ON pt.track_id = f.track_id
+                    LEFT JOIN playlists p ON p.id = pt.playlist_id
                     WHERE f.downloaded_at >= ?
+                    GROUP BY f.track_id, t.name, t.artist, t.cover_url, f.downloaded_at
                     ORDER BY f.downloaded_at DESC
                     LIMIT 50
                     """,
@@ -5359,38 +5471,33 @@ class HomeWindow(QMainWindow):
                 ).fetchall()
         except Exception:
             rows = []
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
-        count = len(rows)
-        self.details_title.setText(f"Downloaded ({count})")
-        if count == 0:
-            empty = QLabel("No new downloads in this run.")
-            empty.setStyleSheet("color: #a9b0bb;")
-            self.downloads_lay.addWidget(empty)
-            return
-
+        detail_rows: list[dict] = []
         for r in rows:
-            tid = r["track_id"]
-            title = f"{r['track_artist']} — {r['track_name']}"
-            try:
-                pls = conn.execute(
-                    """
-                    SELECT DISTINCT p.name
-                    FROM playlist_tracks pt
-                    JOIN playlists p ON p.id = pt.playlist_id
-                    WHERE pt.track_id = ?
-                    ORDER BY p.name
-                    """,
-                    (tid,),
-                ).fetchall()
-                pl_names = ", ".join([p["name"] for p in pls])
-            except Exception:
-                pl_names = ""
-            subtitle = pl_names or "(no playlist)"
-            self.downloads_lay.addWidget(
-                DownloadRow(title=title, subtitle=subtitle, image_url=r["cover_url"], net=self._net)
+            tid = str(r["track_id"])
+            names_raw = str(r["playlist_names"] or "").strip()
+            subtitle = names_raw.replace(",", ", ") if names_raw else "(no playlist)"
+            detail_rows.append(
+                {
+                    "key": tid,
+                    "title": f"{r['track_artist']} — {r['track_name']}",
+                    "subtitle": subtitle,
+                    "image_url": r["cover_url"],
+                }
             )
 
-        self.downloads_lay.addStretch(1)
+        self._render_details_rows(
+            mode="downloaded",
+            title=f"Downloaded ({len(detail_rows)})",
+            rows=detail_rows,
+            empty_text="No new downloads in this run.",
+        )
 
     def _reset_run_stats(self) -> None:
         self._playlists_total = None
@@ -5489,7 +5596,17 @@ class HomeWindow(QMainWindow):
                 self._last_line = line
             self._parse_line(line)
         self._update_run_detail()
-        self._maybe_refresh_downloads()
+        # Coalesce rapid output bursts into fewer UI refreshes.
+        self._schedule_details_refresh()
+
+    def _schedule_details_refresh(self) -> None:
+        try:
+            if self._details_refresh_timer.isActive():
+                return
+            self._details_refresh_timer.start()
+        except Exception:
+            # Fallback: keep existing behavior if timer setup fails.
+            self._maybe_refresh_downloads()
 
     def _maybe_refresh_downloads(self) -> None:
         if not self.details_panel.isVisible():
@@ -5503,43 +5620,35 @@ class HomeWindow(QMainWindow):
         self._load_downloaded_details()
 
     def _render_sync_details(self) -> None:
-        self._clear_downloads()
-
         total = len(self._sync_items_order)
         show_cap = 200
         shown = min(total, show_cap)
-
-        if total == 0:
-            self.details_title.setText("Details")
-            empty = QLabel("Waiting for tracks…")
-            empty.setStyleSheet("color: #a9b0bb;")
-            self.downloads_lay.addWidget(empty)
-            return
-
-        if total > show_cap:
-            self.details_title.setText(f"Sync items ({shown} of {total})")
-        else:
-            self.details_title.setText(f"Sync items ({total})")
-
+        sync_rows: list[dict] = []
         for tid in self._sync_items_order[:show_cap]:
             it = self._sync_items.get(tid) or {}
-            title = it.get("title") or tid
-            subtitle = it.get("status") or "Queued"
-            self.downloads_lay.addWidget(
-                DownloadRow(
-                    title=title,
-                    subtitle=subtitle,
-                    image_url=it.get("cover_url"),
-                    net=self._net,
-                )
+            sync_rows.append(
+                {
+                    "key": str(tid),
+                    "title": str(it.get("title") or tid),
+                    "subtitle": str(it.get("status") or "Queued"),
+                    "image_url": it.get("cover_url"),
+                }
             )
 
         if total > show_cap:
-            more = QLabel(f"… and {total - show_cap} more")
-            more.setStyleSheet("color: #a9b0bb;")
-            self.downloads_lay.addWidget(more)
+            title = f"Sync items ({shown} of {total})"
+            tail_note = f"… and {total - show_cap} more"
+        else:
+            title = f"Sync items ({total})"
+            tail_note = None
 
-        self.downloads_lay.addStretch(1)
+        self._render_details_rows(
+            mode="sync",
+            title=title if total > 0 else "Details",
+            rows=sync_rows,
+            empty_text="Waiting for tracks…",
+            tail_note=tail_note,
+        )
 
     def _parse_line(self, line: str) -> None:
         # Hide noisy backend debug output unless Debug mode is enabled.
@@ -5613,7 +5722,7 @@ class HomeWindow(QMainWindow):
                     "status": "Queued",
                 }
                 if self.details_panel.isVisible() and self._is_sync_running():
-                    self._render_sync_details()
+                    self._schedule_details_refresh()
                 return
 
             if t == "queue_truncated":
@@ -5630,7 +5739,7 @@ class HomeWindow(QMainWindow):
                 it["status"] = "Downloading…"
                 self._sync_items[tid] = it
                 if self.details_panel.isVisible() and self._is_sync_running():
-                    self._render_sync_details()
+                    self._schedule_details_refresh()
                 return
 
             if t == "download_done":
@@ -5658,7 +5767,7 @@ class HomeWindow(QMainWindow):
                     pass
 
                 if self.details_panel.isVisible() and self._is_sync_running():
-                    self._render_sync_details()
+                    self._schedule_details_refresh()
                 return
 
             if t == "missing_final":
