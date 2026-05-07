@@ -16,6 +16,11 @@ synced_backup.txt
 cdj_fix_batch.log
 cdj_unsupported_candidates.txt
 cdj_unsupported_song_names.txt
+cdj_bulk_fix.log
+cdj_track_check_report.txt
+
+# Claude AI memory / project context
+.claude/
 
 # Python
 __pycache__/
