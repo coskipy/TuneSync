@@ -113,11 +113,12 @@ def run_sync(
                 if r and r.ok:
                     try:
                         rel = r.final_path.relative_to(download_root)
-                        attach_file(conn, r.track_id, rel, download_root)
-                        newly_downloaded_track_ids.append(r.track_id)
+                        if not getattr(r, "already_existed", False):
+                            attach_file(conn, r.track_id, rel, download_root)
+                            newly_downloaded_track_ids.append(r.track_id)
+                            if r.transcoded:
+                                summary["transcoded"] += 1
                         summary["successes"] += 1
-                        if r.transcoded:
-                            summary["transcoded"] += 1
                     except Exception as attach_err:
                         failures.append({"track": getattr(r, "title", None), "error": str(attach_err)})
                 else:

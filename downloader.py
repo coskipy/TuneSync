@@ -201,6 +201,7 @@ class DownloadResult:
     ext: Optional[str] = None
     abr_kbps: Optional[int] = None
     transcoded: bool = False
+    already_existed: bool = False
     error: Optional[str] = None
 
 
@@ -770,7 +771,7 @@ def download_track(
             if p.exists():
                 if progress:
                     print(f"\r  {label}: Already exists ✓                    ")
-                return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title, final_path=p, source_url=None, ext=ext, abr_kbps=None, transcoded=False)
+                return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title, final_path=p, source_url=None, ext=ext, abr_kbps=None, transcoded=False, already_existed=True)
 
         hooks = [_make_progress_hook(label)] if progress else []
 
@@ -1084,10 +1085,10 @@ def download_track_from_url(
         base = f"{_sanitize(label)} {_track_marker(track_id)}"
 
         # Short-circuit if already exists.
-        for ext in ("m4a", "mp3", "flac", "wav", "aiff", "alac", "aac", "webm", "opus"):
+        for ext in ("mp3", "m4a", "flac", "wav", "aiff", "alac", "aac", "webm", "opus"):
             p = (out_root / base).with_suffix(f".{ext}")
             if p.exists():
-                return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title, final_path=p, source_url=url, ext=ext)
+                return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title, final_path=p, source_url=url, ext=ext, already_existed=True)
 
         hooks = [_make_progress_hook(label)] if progress else []
         if progress:
