@@ -14,11 +14,94 @@ from typing import Optional, Dict, Any, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 
 from db import get_conn
 
 # Thread-safe print lock for parallel downloads
 _print_lock = threading.Lock()
+
+_LOG_PATH = Path.home() / "Library" / "Logs" / "LightSync" / "debug.log"
+_log_lock = threading.Lock()
+
+def _dlog(msg: str) -> None:
+    try:
+        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _log_lock:
+            with open(_LOG_PATH, "a", encoding="utf-8") as f:
+                import datetime
+                f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}\n")
+                f.flush()
+    except Exception:
+        pass
+
+_COOKIE_BROWSERS = ("chrome", "safari", "firefox", "chromium", "edge")
+
+
+def _is_bot_detection(err: str) -> bool:
+    return ("Sign in to confirm" in err or "bot" in err.lower()
+            or "HTTP Error 403" in err or "Forbidden" in err)
+
+
+def _is_permission_err(err: str) -> bool:
+    return "Operation not permitted" in err or "Permission denied" in err or "Errno 1" in err or "Errno 13" in err
+
+
+def _ydl_extract(ydl_opts: dict, url: str, *, download: bool) -> Any:
+    """Run yt-dlp extract_info, retrying with browser cookies on bot-detection."""
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=download)
+    except DownloadError as e:
+        if not _is_bot_detection(str(e)):
+            raise
+        _dlog(f"Bot detection on {'download' if download else 'search'} for {url}, trying browser cookies")
+
+    for browser in _COOKIE_BROWSERS:
+        try:
+            opts = {**ydl_opts, "cookiesfrombrowser": (browser,)}
+            with YoutubeDL(opts) as ydl:
+                result = ydl.extract_info(url, download=download)
+            _dlog(f"Cookie fallback succeeded with {browser}")
+            return result
+        except DownloadError as e:
+            msg = str(e)
+            if _is_bot_detection(msg):
+                _dlog(f"{browser}: still bot-blocked, skipping")
+                continue
+            if _is_permission_err(msg):
+                _dlog(f"{browser}: permission denied (sandbox), skipping")
+                continue
+            raise
+        except Exception as e:
+            _dlog(f"{browser}: error ({type(e).__name__}: {e}), skipping")
+            continue
+
+    _dlog("All browsers exhausted")
+    return None
+
+
+def _cleanup_failed_download(out_root: Path, base: str) -> None:
+    """Delete any partial/failed files left on disk so the rescan can't attach them."""
+    for f in out_root.glob(f"{base}.*"):
+        try:
+            f.unlink()
+            _dlog(f"Cleaned up failed download: {f}")
+        except OSError:
+            pass
+
+
+def _run_ydl(ydl_opts: dict, url: str) -> Any:
+    try:
+        return _ydl_extract(ydl_opts, url, download=True)
+    except DownloadError as e:
+        if "format is not available" not in str(e).lower():
+            raise
+        _dlog(f"Format not available for {url}, retrying with bestaudio fallback")
+    # Strip android client restriction and use bestaudio — works for age-restricted/region-locked videos
+    fallback_opts = {**ydl_opts, "format": "bestaudio/best"}
+    fallback_opts.pop("extractor_args", None)
+    return _ydl_extract(fallback_opts, url, download=True)
 
 
 # ---------------------------
@@ -406,11 +489,13 @@ def _pick_best(entries: List[Dict[str, Any]], artist: str, title: str, target: O
 
 def _search_best(artist: str, title: str, duration_ms: Optional[int], release_date: Optional[str] = None, isrc: Optional[str] = None, debug: bool = False, progress: bool = True) -> Optional[Dict[str, Any]]:
     """
-    Tiered search strategy:
+    Two-tier search strategy:
       1) ISRC search on YouTube (exact match if available)
-      2) SoundCloud with date filtering for official uploads
-      3) Multi-source search with scoring (fallback for everything else)
+      2) YouTube keyword search with scoring
     """
+    if not isrc:
+        _dlog(f"No ISRC for '{artist} - {title}', falling through to keyword search")
+
     target = (duration_ms or 0) / 1000.0 if duration_ms else None
 
     opts_flat = {
@@ -419,145 +504,50 @@ def _search_best(artist: str, title: str, duration_ms: Optional[int], release_da
         "default_search": "auto",
         "skip_download": True,
         "extract_flat": True,
-        # Workaround for YouTube 403 errors (see: https://github.com/yt-dlp/yt-dlp/issues/14680)
-        # Use actual player version to avoid pinned player issues
         "extractor_args": {"youtube": {"player_js_version": ["actual"]}},
-        # Suppress expected warnings about SABR/missing formats
         "no_warnings": True,
     }
 
-    # ========== TIER 1: ISRC Search on YouTube ========== 
+    # ========== TIER 1: ISRC Search on YouTube ==========
     if isrc:
+        _dlog(f"Searching YouTube for ISRC: {isrc}")
         if progress:
             print(f"\r  Searching... ISRC", end="", flush=True)
-        
-        with YoutubeDL(opts_flat) as ydl:
-            try:
-                info = ydl.extract_info(f"ytsearch3:{isrc}", download=False)
-                if info:
-                    entries = info.get("entries") or []
-                    if entries:
-                        if debug:
-                            print(f"\n   ✅ Found via ISRC: {entries[0].get('title')} by {entries[0].get('uploader')}")
-                        elif progress:
-                            print(f"\r  Found via ISRC ✓", end="", flush=True)
-                        return entries[0]
-            except Exception:
-                pass
-        
+
+        try:
+            info = _ydl_extract(opts_flat, f"ytsearch3:{isrc}", download=False)
+            if info:
+                entries = info.get("entries") or []
+                if entries:
+                    chosen = entries[0]
+                    _dlog(f"ISRC hit: '{chosen.get('title')}' by '{chosen.get('uploader')}' ({chosen.get('webpage_url') or chosen.get('url')})")
+                    if debug:
+                        print(f"\n   ✅ Found via ISRC: {chosen.get('title')} by {chosen.get('uploader')}")
+                    elif progress:
+                        print(f"\r  Found via ISRC ✓", end="", flush=True)
+                    return chosen
+                else:
+                    _dlog(f"ISRC search returned no entries")
+            else:
+                _dlog(f"ISRC search returned no info")
+        except Exception as e:
+            _dlog(f"ISRC search exception: {type(e).__name__}: {e}")
+
         if debug:
             print(f"   ⚠️  No ISRC results")
 
-    # ========== TIER 2: SoundCloud with Date Filtering ==========
+    # ========== TIER 2: YouTube Keyword Search ==========
     if progress:
-        print(f"\r  Searching... Tier 2", end="", flush=True)
-    
+        print(f"\r  Searching...", end="", flush=True)
     if debug:
-        print(f"\n   🎵 Tier 2: Trying SoundCloud with date filtering")
-    
-    sc_entries = []
-    sc_qvars = [
-        f'scsearch6:"{artist}" "{title}"',
-        f'scsearch6:{artist} - {title}',
-    ]
-    
-    with YoutubeDL(opts_flat) as ydl:
-        for q in sc_qvars:
-            try:
-                info = ydl.extract_info(q, download=False)
-                if info:
-                    entries = info.get("entries") or []
-                    sc_entries.extend(entries)
-            except Exception:
-                continue
-    
-    # Filter SC results by release date and find official uploads
-    sc_official_candidates = []
-    
-    if sc_entries and release_date:
-        from datetime import datetime, timedelta
-        try:
-            # Parse release date
-            if len(release_date) == 4:
-                spotify_date = datetime.strptime(release_date, "%Y")
-            elif len(release_date) == 7:
-                spotify_date = datetime.strptime(release_date, "%Y-%m")
-            else:
-                spotify_date = datetime.strptime(release_date, "%Y-%m-%d")
-            
-            min_upload_date = spotify_date - timedelta(days=30)
-            
-            # Parse artist names for matching
-            artist_parts = []
-            artist_lower = artist.lower()
-            for sep in [',', '&', ' and ', ' x ', ' vs ', ' feat', ' ft']:
-                if sep in artist_lower:
-                    artist_parts = [a.strip() for a in artist_lower.replace(sep, ',').split(',')]
-                    break
-            if not artist_parts:
-                artist_parts = [artist_lower]
-            
-            # Filter and check for official uploads
-            for e in sc_entries:
-                timestamp = e.get("timestamp")
-                if not timestamp:
-                    continue
-                
-                upload_date = datetime.fromtimestamp(timestamp)
-                if upload_date < min_upload_date:
-                    continue  # Too old
-                
-                # Check if this is from an official artist account
-                uploader = (e.get("uploader") or "").lower()
-                duration = e.get("duration", 0)
-                
-                if duration < 60:  # Skip previews
-                    continue
-                
-                # Check if uploader matches any artist
-                is_official = False
-                for artist_part in artist_parts:
-                    norm_artist = artist_part.replace('.', '').replace(' ', '')
-                    norm_uploader = uploader.replace('.', '').replace(' ', '')
-                    if norm_artist in norm_uploader:
-                        is_official = True
-                        break
-                
-                if is_official:
-                    sc_official_candidates.append(e)
-            
-            # If we found official SC uploads with correct date, return best one
-            if sc_official_candidates:
-                if progress:
-                    print(f"\r  Found via SoundCloud ✓", end="", flush=True)
-                if debug:
-                    print(f"\n   ✅ Found {len(sc_official_candidates)} official SoundCloud upload(s)")
-                return _pick_best(sc_official_candidates, artist, title, target, release_date=release_date, debug=debug)
-        
-        except Exception as ex:
-            if debug:
-                print(f"   ⚠️  Tier 2 date parsing failed: {ex}")
-    
-    # ============================================================
-    # TIER 3: Multi-source fallback with all existing scoring
-    # ============================================================
-    if progress:
-        print(f"\r  Searching... Tier 3", end="", flush=True)
-    
-    if debug:
-        print(f"\n   🌐 Tier 3: Multi-source search (SoundCloud + YouTube)")
-    
+        print(f"\n   🌐 Tier 2: YouTube keyword search")
+
     all_entries = []
-    
-    # Collect all SoundCloud results (not just official)
-    all_entries.extend(sc_entries)
-    
-    # Collect YouTube results (flat extraction - fast)
     yt_queries = [
-        f'ytsearch15:"{artist}" "{title}"',  # Quoted search
-        f'ytsearch10:{artist} - {title}',    # Simple search
+        f'ytsearch15:"{artist}" "{title}"',
+        f'ytsearch10:{artist} - {title}',
     ]
-    
+
     with YoutubeDL(opts_flat) as ydl:
         for q in yt_queries:
             try:
@@ -567,16 +557,14 @@ def _search_best(artist: str, title: str, duration_ms: Optional[int], release_da
                     all_entries.extend(entries)
             except Exception:
                 continue
-    
-    # Use _pick_best with all existing scoring logic
+
     if all_entries:
         if progress:
             print(f"\r  Found via search ✓   ", end="", flush=True)
         if debug:
-            print(f"\n   📊 Tier 3: Scoring {len(all_entries)} candidates")
+            print(f"\n   📊 Tier 2: Scoring {len(all_entries)} candidates")
         return _pick_best(all_entries, artist, title, target, release_date=release_date, debug=debug)
-    
-    # No results found at all
+
     return None
 
 
@@ -809,104 +797,83 @@ def download_track(
             }
             if ffmpeg_location:
                 ydl_opts["ffmpeg_location"] = ffmpeg_location
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(u, download=True)
-                if info is None:
-                    return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
-                                          source_url=u, error="Download failed (yt-dlp returned no info)")
-                if info.get("_type") == "playlist" and info.get("entries"):
-                    info = info["entries"][0]
+            info = _run_ydl(ydl_opts, u)
+            if info is None:
+                _dlog(f"_run_ydl returned None for {u}")
+                _cleanup_failed_download(out_root, base)
+                return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
+                                      source_url=u, error="Download failed (yt-dlp returned no info)")
+            if info.get("_type") == "playlist" and info.get("entries"):
+                info = info["entries"][0]
 
-                # Get the actual filename yt-dlp created (this is the source of truth!)
-                # yt-dlp stores the final filepath in info dict after download
-                actual_filepath = info.get("_filename") or info.get("filepath")
-                
-                if actual_filepath and Path(actual_filepath).exists():
-                    # Use the file yt-dlp actually created
-                    final = Path(actual_filepath)
-                else:
-                    # Fallback: search by literal track marker only (safe under concurrency)
-                    final = None
-                    
-                    # Wait a moment for filesystem to catch up, then search by track_id
-                    for retry in range(8):
-                        found = _find_downloaded_file_by_marker(out_root, track_id=track_id)
-                        if found:
-                            audio_ext = found.suffix.lstrip(".").lower()
-                            expected_name = f"{base}.{audio_ext}"
-                            expected_path = out_root / expected_name
-                            if found != expected_path:
-                                try:
-                                    found.rename(expected_path)
-                                    final = expected_path
-                                except OSError:
-                                    final = found
-                            else:
+            actual_filepath = info.get("_filename") or info.get("filepath")
+            _dlog(f"yt-dlp reported filepath: {actual_filepath}")
+            if actual_filepath and Path(actual_filepath).exists():
+                final = Path(actual_filepath)
+            else:
+                final = None
+                for retry in range(8):
+                    found = _find_downloaded_file_by_marker(out_root, track_id=track_id)
+                    if found:
+                        audio_ext = found.suffix.lstrip(".").lower()
+                        expected_name = f"{base}.{audio_ext}"
+                        expected_path = out_root / expected_name
+                        if found != expected_path:
+                            try:
+                                found.rename(expected_path)
+                                final = expected_path
+                            except OSError:
                                 final = found
-                        
-                        if final:
-                            break
-                        time.sleep(0.5)
-                    
-                    if not final:
-                        # Debug: show what we were looking for
-                        debug_msg = f"Download reported success but file not found. Expected: {base}.* in {out_root}"
-                        return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
-                                              source_url=u,
-                                              error=debug_msg)
-
-                # Check if the downloaded file is a preview (< 60 seconds)
-                actual_duration = _safe_duration_seconds(final)
-                if actual_duration and actual_duration < 60:
-                    # Delete the preview file
-                    try:
-                        final.unlink()
-                    except OSError:
-                        pass
+                        else:
+                            final = found
+                    if final:
+                        break
+                    time.sleep(0.5)
+                if not final:
+                    _cleanup_failed_download(out_root, base)
+                    debug_msg = f"Download reported success but file not found. Expected: {base}.* in {out_root}"
                     return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
-                                          source_url=u,
-                                          error="Only preview found (< 60 seconds)")
+                                          source_url=u, error=debug_msg)
 
-                ext = final.suffix.lstrip(".").lower()
-                if ext in REKORDBOX_AUDIO_EXTS:
-                    abr = int(info["abr"]) if isinstance(info.get("abr"), (int, float)) else None
-
-                    if ext == "mp3":
-                        # Already MP3 (e.g. SoundCloud) — keep as-is, no transcode
-                        if progress:
-                            print(f"\r  {label}: Complete ✓                    ")
-                        return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title,
-                                              final_path=final,
-                                              source_url=u, ext=ext, abr_kbps=abr, transcoded=False)
-
-                    if progress:
-                        print(f"\r  ", end="", flush=True)
-                    out_path = out_root / f"{base}.mp3"
-                    _ffmpeg_transcode_to_mp3(final, out_path, kbps=aac_kbps)
-                    try:
-                        final.unlink()
-                    except OSError:
-                        pass
-                    if progress:
-                        print(f"\r  {label}: Complete ✓ (→ mp3)                    ")
-                    return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title,
-                                          final_path=out_path,
-                                          source_url=u, ext="mp3", abr_kbps=aac_kbps, transcoded=True)
-
-                # Non-Rekordbox format (opus, webm, etc.) — transcode to mp3
-                if progress:
-                    print(f"\r  ", end="", flush=True)
-                out_path = out_root / f"{base}.mp3"
-                _ffmpeg_transcode_to_mp3(final, out_path, kbps=aac_kbps)
+            _dlog(f"Resolved file: {final}")
+            actual_duration = _safe_duration_seconds(final)
+            _dlog(f"Duration: {actual_duration}s, ext: {final.suffix}")
+            if actual_duration and actual_duration < 60:
                 try:
                     final.unlink()
                 except OSError:
                     pass
+                return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
+                                      source_url=u, error="Only preview found (< 60 seconds)")
+
+            ext = final.suffix.lstrip(".").lower()
+            abr = int(info["abr"]) if isinstance(info.get("abr"), (int, float)) else None
+
+            if ext == "mp3":
                 if progress:
-                    print(f"\r  {label}: Complete ✓ (→ mp3)                    ")
+                    print(f"\r  {label}: Complete ✓                    ")
                 return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title,
-                                      final_path=out_path,
-                                      source_url=u, ext="mp3", abr_kbps=aac_kbps, transcoded=True)
+                                      final_path=final, source_url=u, ext=ext, abr_kbps=abr, transcoded=False)
+
+            # Transcode everything else (m4a, opus, webm, etc.) to mp3
+            _dlog(f"Transcoding {final} → {base}.mp3 at {aac_kbps}kbps")
+            if progress:
+                print(f"\r  ", end="", flush=True)
+            out_path = out_root / f"{base}.mp3"
+            try:
+                _ffmpeg_transcode_to_mp3(final, out_path, kbps=aac_kbps)
+            except Exception as transcode_err:
+                _cleanup_failed_download(out_root, base)
+                return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title,
+                                      source_url=u, error=f"Transcode failed: {transcode_err}")
+            try:
+                final.unlink()
+            except OSError:
+                pass
+            if progress:
+                print(f"\r  {label}: Complete ✓ (→ mp3)                    ")
+            return DownloadResult(ok=True, track_id=track_id, artist=artist, title=title,
+                                  final_path=out_path, source_url=u, ext="mp3", abr_kbps=aac_kbps, transcoded=True)
 
         # Fresh search (always - no caching to avoid infinite loops with bad sources)
         chosen = _search_best(artist, title, duration_ms, release_date=release_date, isrc=isrc, debug=debug, progress=progress)
@@ -921,9 +888,16 @@ def download_track(
                 print(f"\r  {label}: Missing URL ✗                    ")
             return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, error="Selected entry has no URL")
 
+        _dlog(f"Downloading URL: {url}")
         return _do_download(url)
 
     except Exception as e:
+        import traceback
+        _dlog(f"Unhandled exception in download_track: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+        try:
+            _cleanup_failed_download(out_root, base)
+        except Exception:
+            pass
         return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, error=_classify_error(str(e)))
 
 
@@ -1118,10 +1092,9 @@ def download_track_from_url(
         if ffmpeg_location:
             ydl_opts["ffmpeg_location"] = ffmpeg_location
 
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if info is None:
-                return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, source_url=url, error="Download failed")
+        info = _run_ydl(ydl_opts, url)
+        if info is None:
+            return DownloadResult(ok=False, track_id=track_id, artist=artist, title=title, source_url=url, error="Download failed")
             if info.get("_type") == "playlist" and info.get("entries"):
                 info = info["entries"][0]
 

@@ -100,6 +100,36 @@ if __name__ == "__main__":
             print(f"❌ Rescan failed: {e}")
             traceback.print_exc()
 
+        # 3b) Purge DB entries for untagged M4A files left by failed downloads.
+        # These are files yt-dlp wrote but we never transcoded — they have no ID3/MP4
+        # tags, so they're junk. Removing the DB entry lets the track be re-downloaded.
+        try:
+            from mutagen import File as MutagenFile
+            conn = get_conn()
+            rows = conn.execute("SELECT track_id, file_path FROM files").fetchall()
+            purged = 0
+            for row in rows:
+                from db import resolve_path
+                p = resolve_path(DOWNLOAD_ROOT, row["file_path"])
+                if p and p.suffix.lower() == ".m4a" and p.exists():
+                    try:
+                        mf = MutagenFile(p)
+                        has_tags = mf is not None and bool(mf.tags)
+                    except Exception:
+                        has_tags = True  # don't delete if we can't check
+                    if not has_tags:
+                        conn.execute("DELETE FROM files WHERE track_id = ?", (row["track_id"],))
+                        try:
+                            p.unlink()
+                        except OSError:
+                            pass
+                        purged += 1
+            if purged:
+                conn.commit()
+                print(f"🧹 Purged {purged} untagged M4A file(s) left by failed downloads")
+        except Exception as e:
+            print(f"⚠️  Orphan purge failed: {e}")
+
         # 4) Recompute missing after rescan
         try:
             conn = get_conn()
@@ -245,11 +275,17 @@ if __name__ == "__main__":
                 )
                 print(f"⚠️  {len(final_missing)} track(s) still missing after {MAX_SYNC_ATTEMPTS} attempt(s).")
 
-                # Only mark unavailable for tracks that appear truly not-found.
+                # Mark permanently failed tracks as unavailable so they don't retry next sync.
+                _PERMANENT_ERRORS = (
+                    "no suitable youtube match",
+                    "format is not available",
+                    "only preview found",
+                    "no isrc",
+                )
                 for r in final_missing:
                     tid = str(r["id"])
-                    err = (last_error_by_track_id.get(tid) or "").strip()
-                    if "no suitable youtube match" in err.lower():
+                    err = (last_error_by_track_id.get(tid) or "").strip().lower()
+                    if any(p in err for p in _PERMANENT_ERRORS):
                         try:
                             mark_track_unavailable(conn, tid, reason=err)
                         except Exception:
