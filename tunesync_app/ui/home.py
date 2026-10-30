@@ -2949,6 +2949,7 @@ class HomeWindow(QMainWindow):
         self._last_rendered_playlists: list[dict] = []
         self._pix_cache: dict[str, QPixmap] = {}
         self._sync_proc: Optional[QProcess] = None
+        self._ytdlp_wait_deadline: Optional[float] = None
         self._sync_cancel_requested = False
         self._sync_started_epoch: float | None = None
         self._sync_hover_cancel = False
@@ -4770,11 +4771,38 @@ class HomeWindow(QMainWindow):
 
         rep.finished.connect(finished)
 
-    def _start_sync(self) -> None:
+    def _defer_sync_for_ytdlp_update(self) -> bool:
+        # The launch-time yt-dlp update runs in a background thread. If it's still
+        # downloading, hold the sync briefly so the worker (which calls
+        # apply_update() on startup) picks up the fresh version.
+        try:
+            from tunesync_app.yt_dlp_updater import is_update_running
+
+            updating = is_update_running()
+        except Exception:
+            updating = False
+
+        now = time.monotonic()
+        if self._ytdlp_wait_deadline is None:
+            self._ytdlp_wait_deadline = now + 30.0
+        if updating and now < self._ytdlp_wait_deadline:
+            self.run_status.setText("Updating yt-dlp…")
+            QTimer.singleShot(250, lambda: self._start_sync(_ytdlp_waited=True))
+            return True
+        self._ytdlp_wait_deadline = None
+        return False
+
+    def _start_sync(self, _ytdlp_waited: bool = False) -> None:
         # Spawn a subprocess that runs the sync pipeline and streams progress to stdout.
         # In dev: `python -u -m tunesync_app --sync-worker`
         # In packaged app: `<TuneSync> --sync-worker`
         if self._sync_proc is not None and self._sync_proc.state() != QProcess.NotRunning:
+            return
+
+        # Already waiting on the yt-dlp update; ignore repeat clicks.
+        if self._ytdlp_wait_deadline is not None and not _ytdlp_waited:
+            return
+        if self._defer_sync_for_ytdlp_update():
             return
 
         self._sync_cancel_requested = False

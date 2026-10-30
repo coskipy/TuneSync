@@ -5,7 +5,7 @@
 from pathlib import Path
 import os
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
 block_cipher = None
 
@@ -24,6 +24,13 @@ datas = [
 # Bundle the imageio-ffmpeg packaged binaries (ffmpeg) for self-contained builds.
 try:
     datas += collect_data_files("imageio_ffmpeg")
+except Exception:
+    pass
+
+# yt-dlp's dist-info lets the auto-updater read the bundled version without
+# importing it (so a stale cached update never overrides a newer bundled copy).
+try:
+    datas += copy_metadata("yt-dlp")
 except Exception:
     pass
 
