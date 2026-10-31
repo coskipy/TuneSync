@@ -4870,6 +4870,8 @@ class HomeWindow(QMainWindow):
         try:
             env = [f"{k}={v}" for k, v in os.environ.items()]
             env.append("TUNESYNC_UI=1")
+            # Windows pipes default to cp1252; we decode the worker's output as UTF-8.
+            env.append("PYTHONIOENCODING=utf-8")
             if self._debug_mode_enabled():
                 env.append("TUNESYNC_DEBUG=1")
             proc.setEnvironment(env)

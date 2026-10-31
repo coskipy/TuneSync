@@ -1,0 +1,44 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          python -m pip install -r requirements.txt pyinstaller pillow
+
+      - name: Generate .ico from logo
+        run: |
+          python -c "from PIL import Image; Image.open('tunesync_app/ui/images/tunesync_logo.png').save('assets/TuneSync.ico', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+
+      - name: Build
+        run: python -m PyInstaller --noconfirm TuneSync_win.spec
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/TuneSync/TuneSync.exe)) { throw "TuneSync.exe missing" }
+          if (-not (Get-ChildItem -Recurse dist/TuneSync -Filter "ffmpeg*.exe")) { throw "bundled ffmpeg missing" }
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path dist/TuneSync -DestinationPath dist/TuneSync-windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TuneSync-windows
+          path: dist/TuneSync-windows.zip
